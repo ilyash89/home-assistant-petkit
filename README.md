@@ -349,11 +349,13 @@ The PetKit cloud identifies this fountain family as device type <code>CTW3</code
 | `Light`                   | `Switch`        | Cloud setting. Does not need the BLE relay. |
 | `Light brightness`        | `Select`        | Low / medium / high. Cloud setting, available while the light is on. |
 | `Do not disturb`          | `Switch`        | Turns the feature on or off. The schedule is still set in the PetKit app. Cloud setting. |
-| `Power`                   | `Switch`        | On/off through the BLE relay. The current mode is sent with the command so it is not rewritten. |
+| `Power`                   | `Switch`        | On/off through the BLE relay. |
 | `Mode`                    | `Select`        | Standard (continuous flow), intermittent, or battery. Requires the BLE relay. |
 | `Reset filter`            | `Button`        | Requires the BLE relay. |
 
-Power, mode, and filter reset use the same PetKit BLE relay as the other fountains. The opcode bytes and the rule "poll result 1 means connected" come from py-petkit-api. Light, brightness, and do-not-disturb are written with `ctw3/updateSettings`. Those writes send API version `13.2.1` (the current py-petkit-api client). Every other device still uses the petkitaio `11.2.1` headers. A cloud value of `-1` for energy, total pump runtime, or filter days is shown as unavailable.
+Power, mode, and filter reset use the same PetKit BLE relay as the other fountains. The opcode bytes and the rule "poll result 1 means connected" come from py-petkit-api. Light, brightness, and do-not-disturb are written with `ctw3/updateSettings`. Those writes use a separate login as API `13.2.1` (the same client blob as py-petkit-api). The session used for every other device stays on petkitaio `11.2.1`. A cloud value of `-1` for energy, total pump runtime, or filter days is shown as unavailable.
+
+To capture the next hardware trace, set the logger `custom_components.petkit` to `debug`. Warning lines are enough for the command result: they include the API version, BLE `type`, poll results, `controlDevice` result, and `mode` / `powerStatus` / `runStatus` / `updateAt` after each read. Tokens, passwords, MAC addresses, and device ids are not written.
 </details>
 
 ## Litter Boxes

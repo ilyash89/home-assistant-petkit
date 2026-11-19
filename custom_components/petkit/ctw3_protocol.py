@@ -232,9 +232,9 @@ def ctw3_request_headers(
 ) -> dict[str, str]:
     """Session headers with the current PetKit app identity.
 
-    The session token from petkitaio is kept. Version, user agent, and client
-    fields are replaced so CTW3 writes are not rejected as an outdated app.
-    Other devices keep using ``create_header()`` unchanged.
+    Version, user agent, client, locale, and timezone fields match
+    py-petkit-api 13.2.1. The caller supplies the session token. Other
+    devices keep using ``create_header()`` unchanged.
     """
 
     headers = dict(session_header)
@@ -310,3 +310,133 @@ def command_code(command: list[int]) -> str:
     """Cloud ``cmd`` form field (the BLE opcode as a decimal string)."""
 
     return str(command[0])
+
+
+# py-petkit-api logs in through passport ``v1/regionservers`` and sends this
+# client blob. petkitaio 0.1.12 logs in as iOS 11.2.1; a 13.2.1 header on that
+# older session still gets Error 97 on CTW3 writes.
+PASSPORT_REGION_SERVERS = "https://passport.petkt.com/v1/regionservers"
+CHINA_GATEWAY = "https://api.petkit.cn/6/"
+_SECRET_KEYS = {
+    "password",
+    "client",
+    "token",
+    "session",
+    "data",
+    "mac",
+    "sn",
+    "id",
+    "bleid",
+    "username",
+    "groupid",
+}
+
+
+def modern_client_blob(timezone: str | None) -> dict[str, str]:
+    """Client object py-petkit-api puts in the login form."""
+
+    return {
+        "locale": "en-US",
+        "name": "23127PN0CG",
+        "osVersion": "16.1",
+        "phoneBrand": "Xiaomi",
+        "platform": "android",
+        "source": "app.petkit-android",
+        "version": CTW3_API_VERSION,
+        "timezoneId": timezone or "UTC",
+        "timezone": timezone_offset(timezone),
+    }
+
+
+def modern_login_form(
+    username: str,
+    password_md5: str,
+    region_id: str,
+    timezone: str | None,
+) -> dict[str, str]:
+    """Login form body. ``client`` is a Python dict string, as both libraries send."""
+
+    return {
+        "client": str(modern_client_blob(timezone)),
+        "encrypt": "1",
+        "oldVersion": CTW3_API_VERSION,
+        "password": password_md5,
+        "region": region_id,
+        "username": username,
+    }
+
+
+def gateway_for_region(
+    servers: Any, region_name: str | None
+) -> tuple[str, str] | None:
+    """Return ``(gateway, region id)`` from a regionservers list."""
+
+    if isinstance(servers, dict):
+        servers = servers.get("list") or servers.get("result") or []
+    if not isinstance(servers, list) or not region_name:
+        return None
+    wanted = region_name.strip().lower()
+    for server in servers:
+        if not isinstance(server, dict):
+            continue
+        name = str(server.get("name", "")).strip().lower()
+        region_id = str(server.get("id", "")).strip()
+        if wanted not in {name, region_id.lower()}:
+            continue
+        gateway = str(server.get("gateway") or "")
+        if gateway and not gateway.endswith("/"):
+            gateway += "/"
+        if gateway and region_id:
+            return gateway, region_id.lower()
+    return None
+
+
+def regionserver_list(response: Any) -> list[Any]:
+    """Accept either the raw JSON body or an already unwrapped result."""
+
+    if not isinstance(response, dict):
+        return []
+    result = response.get("result", response)
+    if isinstance(result, dict):
+        listing = result.get("list")
+        if isinstance(listing, list):
+            return listing
+    if isinstance(result, list):
+        return result
+    return []
+
+
+def sanitize_mapping(value: Any) -> Any:
+    """Copy a request or response with secrets and device identifiers removed."""
+
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            if str(key).lower() in _SECRET_KEYS or str(key).lower() in {"x-session", "f-session"}:
+                cleaned[key] = "present" if item not in (None, "") else "missing"
+                continue
+            cleaned[key] = sanitize_mapping(item)
+        return cleaned
+    if isinstance(value, list):
+        return [sanitize_mapping(item) for item in value[:8]]
+    if isinstance(value, str) and len(value) > 180:
+        return f"<len {len(value)}>"
+    return value
+
+
+def device_state_summary(payload: Any) -> dict[str, Any]:
+    """Fields that show whether a CTW3 command actually landed."""
+
+    if not isinstance(payload, dict):
+        return {"result": payload}
+    settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
+    status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
+    return {
+        "mode": payload.get("mode", status.get("mode")),
+        "powerStatus": payload.get("powerStatus", status.get("powerStatus")),
+        "runStatus": payload.get("runStatus", status.get("runStatus")),
+        "updateAt": payload.get("updateAt"),
+        "lampRingSwitch": settings.get("lampRingSwitch"),
+        "lampRingBrightness": settings.get("lampRingBrightness"),
+        "noDisturbingSwitch": settings.get("noDisturbingSwitch"),
+    }

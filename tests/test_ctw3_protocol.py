@@ -33,6 +33,10 @@ power_command = _PROTOCOL.power_command
 reset_filter_command = _PROTOCOL.reset_filter_command
 select_ble_type = _PROTOCOL.select_ble_type
 known_number = _PROTOCOL.known_number
+gateway_for_region = _PROTOCOL.gateway_for_region
+modern_login_form = _PROTOCOL.modern_login_form
+sanitize_mapping = _PROTOCOL.sanitize_mapping
+device_state_summary = _PROTOCOL.device_state_summary
 ctw3_request_headers = _PROTOCOL.ctw3_request_headers
 ble_poll_connected = _PROTOCOL.ble_poll_connected
 ble_control_accepted = _PROTOCOL.ble_control_accepted
@@ -128,6 +132,33 @@ class Ctw3ProtocolTest(unittest.TestCase):
                 {"settings": {"lampRingSwitch": 0, "lampRingBrightness": 2}},
                 {"settings": {"lampRingSwitch": 0}},
             )
+        )
+
+    def test_modern_login_form_and_redaction(self) -> None:
+        gateway, region_id = gateway_for_region(
+            [{"name": "Germany", "id": "DE", "gateway": "https://api.eu-pet.com/latest"}],
+            "Germany",
+        )
+        self.assertEqual(gateway, "https://api.eu-pet.com/latest/")
+        self.assertEqual(region_id, "de")
+        form = modern_login_form("user@example.com", "abc", region_id, "UTC")
+        self.assertEqual(form["oldVersion"], "13.2.1")
+        self.assertEqual(form["region"], "de")
+        self.assertIn("'version': '13.2.1'", form["client"])
+        self.assertIn("'source': 'app.petkit-android'", form["client"])
+        cleaned = sanitize_mapping(
+            {"X-Session": "secret", "password": "abc", "id": 10, "cmd": "220", "mac": "aa"}
+        )
+        self.assertEqual(cleaned["X-Session"], "present")
+        self.assertEqual(cleaned["password"], "present")
+        self.assertEqual(cleaned["id"], "present")
+        self.assertEqual(cleaned["mac"], "present")
+        self.assertEqual(cleaned["cmd"], "220")
+        self.assertEqual(
+            device_state_summary(
+                {"mode": 1, "powerStatus": 1, "runStatus": 0, "updateAt": 5, "settings": {}}
+            )["updateAt"],
+            5,
         )
 
 

@@ -9,7 +9,8 @@ other device and adds the Max family beside those results.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
+import hashlib
 import json
 from typing import Any
 
@@ -21,6 +22,7 @@ from petkitaio.model import W5Fountain
 from .const import LOGGER
 from .ctw3_protocol import (
     BLE_POLL_ERROR,
+    CHINA_GATEWAY,
     CTW3_DATA_ENDPOINT,
     CTW3_MODEL_FALLBACK,
     CTW3_SETTINGS_ENDPOINT,
@@ -30,12 +32,18 @@ from .ctw3_protocol import (
     ble_poll_connected,
     command_code,
     ctw3_request_headers,
+    device_state_summary,
     encode_ble_frame,
     expectation_met,
     flatten_device_catalog,
+    gateway_for_region,
     is_ctw3_type,
     model_name_from_catalog,
+    modern_login_form,
     normalize_ctw3_payload,
+    PASSPORT_REGION_SERVERS,
+    regionserver_list,
+    sanitize_mapping,
     select_ble_type,
 )
 
@@ -61,6 +69,11 @@ class ExtendedPetKitClient(PetKitClient):
         self._relay_online_without_code = False
         self._device_catalog: list[dict[str, Any]] | None = None
         self._ctw3_ble_counter: dict[int, int] = {}
+        self._control_token: str | None = None
+        self._control_token_expiration: datetime | None = None
+        self._control_base_url: str | None = None
+        self._last_poll_results: list[Any] = []
+        self._last_connect_states: list[Any] = []
 
     async def get_device_rosters(self) -> dict[int, Any]:
         """Fetch rosters and keep the latest copy for the CTW3 pass."""
@@ -96,14 +109,18 @@ class ExtendedPetKitClient(PetKitClient):
         object for ``DeviceCommand.UPDATE_SETTING``.
         """
 
-        url = f"{self.base_url}{CTW3_SETTINGS_ENDPOINT}"
-        header = await self._ctw3_header()
-        await self._post(
-            url,
-            header,
-            {"id": fountain.id, "kv": json.dumps(settings)},
+        header, base_url = await self._control_header()
+        url = f"{base_url}{CTW3_SETTINGS_ENDPOINT}"
+        body = {"id": fountain.id, "kv": json.dumps(settings)}
+        LOGGER.warning(
+            "CTW3 settings write keys=%s session=api-%s",
+            settings,
+            header.get("X-Api-Version"),
         )
-        await self._pull_device_state(fountain, header, {"settings": settings}, attempts=2, delay=1)
+        await self._exchange("updateSettings", url, header, body)
+        await self._pull_device_state(
+            fountain, header, {"settings": settings}, attempts=2, delay=1, base_url=base_url
+        )
 
     async def send_ctw3_command(
         self,
@@ -132,7 +149,7 @@ class ExtendedPetKitClient(PetKitClient):
                 f'BLE type for {fountain.data.get("name", fountain.id)} is unknown, '
                 "so the command was not sent."
             )
-        header = await self._ctw3_header()
+        header, base_url = await self._control_header()
         ble_data = {
             "bleId": fountain.data["id"],
             "mac": fountain.data["mac"],
@@ -146,35 +163,214 @@ class ExtendedPetKitClient(PetKitClient):
             "mac": fountain.data["mac"],
             "type": ble_type,
         }
+        LOGGER.warning(
+            "CTW3 BLE start cmd=%s type=%s type_source=%s counter=%s bytes=%s session=api-%s",
+            command_data["cmd"],
+            ble_type,
+            fountain.data.get("_ble_type_source", "not recorded"),
+            counter,
+            command,
+            header.get("X-Api-Version"),
+        )
+        await self._log_relay_type_ids(header, base_url, fountain.id)
         connected = False
+        control_result: Any = None
+        self._last_poll_results = []
+        self._last_connect_states = []
         try:
-            connected = await self._open_ble(header, ble_data)
+            connected = await self._open_ble(header, ble_data, base_url=base_url)
             if not connected:
                 raise BluetoothError(
-                    "BLE connection step failed while attempting to send the command to the water fountain"
+                    "BLE connection step failed while attempting to send the command to the water fountain. "
+                    f"connect states={self._last_connect_states!r} poll results={self._last_poll_results!r}"
                 )
-            response = await self._post(
-                f"{self.base_url}{Endpoint.CONTROL_WF}", header, command_data
+            response = await self._exchange(
+                "controlDevice",
+                f"{base_url}{Endpoint.CONTROL_WF}",
+                header,
+                command_data,
             )
-            if not ble_control_accepted(response.get("result")):
+            control_result = response.get("result")
+            if not ble_control_accepted(control_result):
                 raise BluetoothError(
                     "PetKit accepted the BLE session but did not accept the fountain command "
-                    f"(result={response.get('result')!r})"
+                    f"(result={control_result!r}). result=1 only means the relay accepted the "
+                    "packet in py-petkit-api; this response was not 1."
                 )
             self._ctw3_ble_counter[fountain.id] = counter + 1
             self.last_ble_poll[fountain.id] = datetime.now()
-            await self._pull_device_state(fountain, header, expect)
+            await self._pull_device_state(
+                fountain, header, expect, base_url=base_url
+            )
         finally:
             if connected:
                 try:
-                    await self._post(f"{self.base_url}{Endpoint.BLE_CANCEL}", header, ble_data)
+                    await self._exchange(
+                        "ble/cancel",
+                        f"{base_url}{Endpoint.BLE_CANCEL}",
+                        header,
+                        ble_data,
+                    )
                 except Exception:  # noqa: BLE001 - disconnect is best-effort
                     LOGGER.debug("CTW3 BLE disconnect failed", exc_info=True)
+                await self._pull_device_state(
+                    fountain, header, None, attempts=1, delay=1, base_url=base_url
+                )
+            LOGGER.warning(
+                "CTW3 BLE done cmd=%s type=%s connect=%s poll=%s control=%s state=%s. "
+                "control result 1 means the relay accepted the packet.",
+                command_data["cmd"],
+                ble_type,
+                self._last_connect_states,
+                self._last_poll_results,
+                control_result,
+                device_state_summary(fountain.data),
+            )
 
     async def _ctw3_header(self) -> dict[str, str]:
-        """Headers for CTW3 only. Login and every other device stay on petkitaio."""
+        """Headers for background CTW3 reads. The shared login is left as-is."""
 
         return ctw3_request_headers(await self.create_header(), self.tz)
+
+    async def _control_header(self) -> tuple[dict[str, str], str]:
+        """Headers and base URL for a CTW3 write.
+
+        The shared petkitaio session was created as app 11.2.1. Putting
+        13.2.1 on that session still returns Error 97, so commands use a
+        second login that matches py-petkit-api. The original token is not
+        replaced.
+        """
+
+        await self._ensure_control_session()
+        header = ctw3_request_headers(
+            {
+                "Accept": "*/*",
+                "Accept-Language": "en-US;q=1, it-US;q=0.9",
+                "Accept-Encoding": "gzip, deflate",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "X-Session": self._control_token or "",
+                "F-Session": self._control_token or "",
+            },
+            self.tz,
+        )
+        return header, self._control_base_url or self.base_url
+
+    async def _ensure_control_session(self) -> None:
+        """Log in once as API 13.2.1 without touching the petkitaio token."""
+
+        now = datetime.now()
+        if (
+            self._control_token
+            and self._control_token_expiration
+            and self._control_token_expiration > now + timedelta(seconds=60)
+        ):
+            return
+        saved_token = self.token
+        gateway, region_id = await self._control_gateway()
+        form = modern_login_form(
+            self.username,
+            hashlib.md5(self.password.encode()).hexdigest(),
+            region_id,
+            self.tz,
+        )
+        header = ctw3_request_headers(
+            {
+                "Accept": "*/*",
+                "Accept-Language": "en-US;q=1, it-US;q=0.9",
+                "Accept-Encoding": "gzip, deflate",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            self.tz,
+        )
+        url = f"{gateway}user/login"
+        LOGGER.warning(
+            "CTW3 opening a separate API %s session at %s region=%s. "
+            "The petkitaio session is left in place. If other devices then "
+            "stop updating, PetKit allowed only one session and this login replaced it.",
+            header.get("X-Api-Version"),
+            gateway.split("/")[2] if "://" in gateway else gateway,
+            region_id,
+        )
+        response = await self._exchange("login", url, header, form)
+        session = (response.get("result") or {}).get("session") or {}
+        token = session.get("id")
+        if not token:
+            raise PetKitError("CTW3 modern login did not return a session")
+        self._control_token = token
+        self._control_base_url = gateway
+        expires_in = int(session.get("expiresIn") or 3600)
+        self._control_token_expiration = now + timedelta(seconds=expires_in)
+        if self.token != saved_token:
+            self.token = saved_token
+
+    async def _control_gateway(self) -> tuple[str, str]:
+        """Resolve the same country to the current PetKit gateway."""
+
+        if str(self.region).lower() in {"china", "cn"}:
+            # py-petkit-api skips the region list for China and sends the
+            # configured country name as the login region.
+            return CHINA_GATEWAY, str(self.region).lower()
+        header = ctw3_request_headers(
+            {
+                "Accept": "*/*",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            self.tz,
+        )
+        try:
+            response = await self._exchange(
+                "regionservers", PASSPORT_REGION_SERVERS, header, None, method="GET"
+            )
+            match = gateway_for_region(regionserver_list(response), self.region)
+            if match:
+                return match[0], match[1].lower()
+            LOGGER.warning(
+                "CTW3 v1 regionservers had no entry named %s; using the gateway from the existing login",
+                self.region,
+            )
+        except Exception:  # noqa: BLE001 - fall back to the gateway petkitaio already uses
+            LOGGER.warning("CTW3 v1 regionservers lookup failed", exc_info=True)
+        known = self.servers_dict.get(self.region) or {}
+        gateway = known.get("url") or self.base_url
+        region_id = known.get("id")
+        if not gateway or not region_id:
+            raise PetKitError(
+                f"CTW3 could not resolve a PetKit gateway for region {self.region}"
+            )
+        if not str(gateway).endswith("/"):
+            gateway = f"{gateway}/"
+        return str(gateway), str(region_id)
+
+    async def _exchange(
+        self,
+        step: str,
+        url: str,
+        header: dict[str, str],
+        data: dict[str, Any] | None,
+        method: str = "POST",
+    ) -> dict[str, Any]:
+        """Perform one CTW3 call and log a sanitized request and response."""
+
+        LOGGER.debug(
+            "CTW3 %s %s %s headers=%s body=%s",
+            step,
+            method,
+            url.split("?")[0],
+            sanitize_mapping(header),
+            sanitize_mapping(data or {}),
+        )
+        try:
+            if method == "GET":
+                response = await self._get(url, header)
+            else:
+                response = await self._post(url, header, data or {})
+        except Exception as err:
+            LOGGER.warning("CTW3 %s failed: %s", step, err)
+            raise
+        result = response.get("result") if isinstance(response, dict) else response
+        summary = device_state_summary(result) if isinstance(result, dict) else {"result": result}
+        LOGGER.debug("CTW3 %s result %s", step, summary)
+        return response
 
     async def _pull_device_state(
         self,
@@ -183,16 +379,19 @@ class ExtendedPetKitClient(PetKitClient):
         expect: dict[str, Any] | None,
         attempts: int = _STATE_PULLS,
         delay: int = _STATE_PULL_WAIT,
+        base_url: str | None = None,
     ) -> None:
         """Replace fountain data with a fresh deviceData read."""
 
         model = fountain.data.get("_model")
+        root = base_url or self.base_url
         latest: dict[str, Any] | None = None
-        for _attempt in range(attempts):
+        for attempt in range(1, attempts + 1):
             await asyncio.sleep(delay)
             try:
-                response = await self._post(
-                    f"{self.base_url}{CTW3_DATA_ENDPOINT}",
+                response = await self._exchange(
+                    f"deviceData#{attempt}",
+                    f"{root}{CTW3_DATA_ENDPOINT}",
                     header,
                     {"id": fountain.id},
                 )
@@ -201,19 +400,27 @@ class ExtendedPetKitClient(PetKitClient):
                 continue
             result = response.get("result")
             if not isinstance(result, dict):
+                LOGGER.warning("CTW3 deviceData#%s was not an object: %s", attempt, result)
                 continue
             payload = normalize_ctw3_payload(result)
             if model:
                 payload["_model"] = model
             fountain.data = payload
             latest = payload
+            LOGGER.warning(
+                "CTW3 deviceData#%s %s",
+                attempt,
+                device_state_summary(payload),
+            )
             if expectation_met(payload, expect):
                 return
         if expect and latest is not None:
             LOGGER.warning(
-                "CTW3 %s cloud state after the command did not match %s",
-                fountain.id,
+                "CTW3 cloud state after the command did not match %s; last=%s. "
+                "controlDevice result 1 means the relay accepted the packet, "
+                "not that deviceData has changed.",
                 expect,
+                device_state_summary(latest),
             )
 
     async def _load_ctw3_fountains(self) -> dict[int, W5Fountain]:
@@ -278,6 +485,11 @@ class ExtendedPetKitClient(PetKitClient):
         label = model_name_from_catalog(catalog, type_id, type_code)
         payload["_model"] = label or CTW3_MODEL_FALLBACK
         ble_type = select_ble_type(type_id, type_code, relay_type_code)
+        try:
+            type_source = "family-list type" if int(type_id) > 0 else "typeCode concatenation"
+        except (TypeError, ValueError):
+            type_source = "typeCode concatenation"
+        payload["_ble_type_source"] = type_source
         LOGGER.debug(
             "CTW3 %s model=%s ble_type=%s type_id=%s type_code=%s",
             device_id,
@@ -435,13 +647,70 @@ class ExtendedPetKitClient(PetKitClient):
                 online_code = code
                 break
         self._relay_online_without_code = any_online and online_code is None
+        LOGGER.debug(
+            "CTW3 relay scan online=%s typeCode=%s typeIds=%s",
+            any_online,
+            online_code,
+            [
+                relay.get("typeId")
+                for relay in relays.get("result") or []
+                if isinstance(relay, dict) and relay.get("pim") == 1
+            ],
+        )
         return online_code
+
+    def _group_id_for(self, device_id: int) -> Any:
+        """Group id from the last roster. deviceData does not carry it."""
+
+        for roster in (self._last_rosters or {}).values():
+            result = roster.get("result") or {}
+            for device in result.get("devices") or []:
+                if not isinstance(device, dict):
+                    continue
+                try:
+                    if int(device.get("id")) == int(device_id):
+                        return device.get("groupId")
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+    async def _log_relay_type_ids(
+        self, header: dict[str, str], base_url: str, device_id: int
+    ) -> None:
+        """Log relay typeId values. py-petkit sends the fountain type, not this id."""
+
+        group_id = self._group_id_for(device_id)
+        if group_id is None:
+            LOGGER.warning("CTW3 relay list skipped because the group id is unknown")
+            return
+        url = f"{base_url}{Endpoint.BLE_DEVICES}"
+        LOGGER.debug("CTW3 ownSupportBleDevices query groupId set")
+        try:
+            # py-petkit-api sends groupId as a query parameter, not a form field.
+            async with self._session.post(
+                url,
+                headers=header,
+                params={"groupId": group_id},
+                data="",
+                timeout=self.timeout,
+            ) as resp:
+                response = await self._response(resp)
+        except Exception:  # noqa: BLE001
+            LOGGER.warning("CTW3 relay list failed", exc_info=True)
+            return
+        type_ids = [
+            {"typeId": relay.get("typeId"), "pim": relay.get("pim")}
+            for relay in response.get("result") or []
+            if isinstance(relay, dict)
+        ]
+        LOGGER.warning("CTW3 relays %s", type_ids)
 
     async def _open_ble(
         self,
         header: dict[str, str],
         ble_data: dict[str, Any],
         poll_attempts: int = _BLE_POLL_ATTEMPTS,
+        base_url: str | None = None,
     ) -> bool:
         """Connect and poll the relay, returning False when either step fails.
 
@@ -450,32 +719,37 @@ class ExtendedPetKitClient(PetKitClient):
         means the relay is still connecting, so the loop keeps waiting.
         """
 
-        connect_url = f"{self.base_url}{Endpoint.BLE_CONNECT}"
-        poll_url = f"{self.base_url}{Endpoint.BLE_POLL}"
+        root = base_url or self.base_url
+        connect_url = f"{root}{Endpoint.BLE_CONNECT}"
+        poll_url = f"{root}{Endpoint.BLE_POLL}"
+        self._last_poll_results = []
+        self._last_connect_states = []
         connected = False
         for attempt in range(1, _BLE_CONNECT_ATTEMPTS + 1):
-            response = await self._post(connect_url, header, ble_data)
+            response = await self._exchange(f"ble/connect#{attempt}", connect_url, header, ble_data)
             result = response.get("result")
             state = result.get("state") if isinstance(result, dict) else None
+            self._last_connect_states.append(state)
             if state == 1:
                 connected = True
                 break
-            LOGGER.debug("CTW3 BLE connect attempt %s failed", attempt)
+            LOGGER.debug("CTW3 ble/connect attempt %s state=%s", attempt, state)
             await asyncio.sleep(3)
         if not connected:
             return False
         for attempt in range(1, poll_attempts + 1):
-            response = await self._post(poll_url, header, ble_data)
+            response = await self._exchange(f"ble/poll#{attempt}", poll_url, header, ble_data)
             result = response.get("result")
+            self._last_poll_results.append(result)
             if ble_poll_connected(result):
                 return True
             if result == BLE_POLL_ERROR:
-                LOGGER.debug("CTW3 BLE poll reported an error")
+                LOGGER.debug("CTW3 ble/poll attempt %s reported an error", attempt)
                 break
-            LOGGER.debug("CTW3 BLE poll attempt %s still connecting (%s)", attempt, result)
+            LOGGER.debug("CTW3 ble/poll attempt %s still connecting (%s)", attempt, result)
             await asyncio.sleep(_BLE_POLL_WAIT)
         try:
-            await self._post(f"{self.base_url}{Endpoint.BLE_CANCEL}", header, ble_data)
+            await self._exchange("ble/cancel", f"{root}{Endpoint.BLE_CANCEL}", header, ble_data)
         except Exception:  # noqa: BLE001
             LOGGER.debug("CTW3 BLE cancel after failed poll failed", exc_info=True)
         return False
