@@ -353,7 +353,7 @@ The PetKit cloud identifies this fountain family as device type <code>CTW3</code
 | `Mode`                    | `Select`        | Standard (continuous flow), intermittent, or battery. Requires the BLE relay. |
 | `Reset filter`            | `Button`        | Requires the BLE relay. |
 
-Power, mode, and filter reset use the same PetKit BLE relay as the other fountains. Light, brightness, and do-not-disturb are written with `ctw3/updateSettings` and do not open the relay. These commands were taken from the public PetKit client libraries and have not been checked against a physical Max 2 in this repository.
+Power, mode, and filter reset use the same PetKit BLE relay as the other fountains. The opcode bytes and the rule "poll result 1 means connected" come from py-petkit-api. Light, brightness, and do-not-disturb are written with `ctw3/updateSettings`. Those writes send API version `13.2.1` (the current py-petkit-api client). Every other device still uses the petkitaio `11.2.1` headers. A cloud value of `-1` for energy, total pump runtime, or filter days is shown as unavailable.
 </details>
 
 ## Litter Boxes

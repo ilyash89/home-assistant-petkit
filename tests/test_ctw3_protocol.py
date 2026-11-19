@@ -32,6 +32,11 @@ normalize_ctw3_payload = _PROTOCOL.normalize_ctw3_payload
 power_command = _PROTOCOL.power_command
 reset_filter_command = _PROTOCOL.reset_filter_command
 select_ble_type = _PROTOCOL.select_ble_type
+known_number = _PROTOCOL.known_number
+ctw3_request_headers = _PROTOCOL.ctw3_request_headers
+ble_poll_connected = _PROTOCOL.ble_poll_connected
+ble_control_accepted = _PROTOCOL.ble_control_accepted
+expectation_met = _PROTOCOL.expectation_met
 
 
 class Ctw3ProtocolTest(unittest.TestCase):
@@ -45,8 +50,8 @@ class Ctw3ProtocolTest(unittest.TestCase):
         self.assertEqual(mode_command(MODE_STANDARD), [220, 1, 3, 0, 1, 1, 1])
         self.assertEqual(mode_command(MODE_INTERMITTENT), [220, 1, 3, 0, 1, 2, 1])
         self.assertEqual(mode_command(MODE_BATTERY), [220, 1, 3, 0, 1, 3, 1])
-        self.assertEqual(power_command(False, MODE_BATTERY), [220, 1, 3, 0, 0, 3, 1])
-        self.assertEqual(power_command(True, 99), [220, 1, 3, 0, 1, 1, 1])
+        self.assertEqual(power_command(False), [220, 1, 3, 0, 0, 1, 1])
+        self.assertEqual(power_command(True), [220, 1, 3, 0, 1, 1, 1])
         self.assertEqual(reset_filter_command(), [222, 1, 0, 0])
         with self.assertRaises(ValueError):
             mode_command(9)
@@ -102,6 +107,28 @@ class Ctw3ProtocolTest(unittest.TestCase):
         self.assertEqual(select_ble_type(30, 4, 1), 30)
         self.assertEqual(select_ble_type(0, 4, 1), 14)
         self.assertIsNone(select_ble_type(None, None, None))
+
+    def test_placeholders_and_current_client_headers(self) -> None:
+        self.assertIsNone(known_number(-1))
+        self.assertIsNone(known_number(True))
+        self.assertEqual(known_number(0), 0)
+        self.assertFalse(ble_poll_connected(0))
+        self.assertTrue(ble_poll_connected(1))
+        self.assertFalse(ble_control_accepted(0))
+        self.assertTrue(ble_control_accepted(1))
+        session = {"X-Session": "token", "X-Api-Version": "11.2.1", "User-Agent": "old"}
+        headers = ctw3_request_headers(session, "UTC")
+        self.assertEqual(session["X-Api-Version"], "11.2.1")
+        self.assertEqual(headers["X-Session"], "token")
+        self.assertEqual(headers["X-Api-Version"], "13.2.1")
+        self.assertEqual(headers["User-Agent"], "okhttp/3.14.9")
+        self.assertEqual(headers["X-Client"], "android(16.1;23127PN0CG)")
+        self.assertTrue(
+            expectation_met(
+                {"settings": {"lampRingSwitch": 0, "lampRingBrightness": 2}},
+                {"settings": {"lampRingSwitch": 0}},
+            )
+        )
 
 
 if __name__ == "__main__":
