@@ -350,6 +350,54 @@ class Ctw3ClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fountain_id, 11)
         self.assertGreater(self.client.token_expiration, datetime.now() + timedelta(hours=1))
 
+    async def test_wire_log_shows_sent_headers_and_error_code(self) -> None:
+        import logging
+
+        messages: list[str] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                messages.append(record.getMessage())
+
+        handler = _Capture()
+        logger = logging.getLogger("custom_components.petkit")
+        logger.addHandler(handler)
+        logger.setLevel(logging.WARNING)
+
+        class _Response:
+            status = 200
+
+            async def json(self) -> dict:
+                return {"error": {"code": 97, "msg": "App is out of date, please upgrade"}}
+
+            async def __aenter__(self) -> "_Response":
+                return self
+
+            async def __aexit__(self, *args: object) -> bool:
+                return False
+
+        class _Session:
+            def post(self, url: str, headers: dict | None = None, data: dict | None = None, timeout: int | None = None) -> _Response:
+                return _Response()
+
+        self.client._session = _Session()
+        header = await self.client.create_header()
+        header["X-Session"] = "super-secret-token"
+        try:
+            with self.assertRaises(PetKitError):
+                await self.client._post(
+                    "https://api.eu-pet.com/latest/ctw3/updateSettings",
+                    header,
+                    {"id": 9, "kv": "{}"},
+                )
+        finally:
+            logger.removeHandler(handler)
+        wire = [line for line in messages if line.startswith("PetKit wire")]
+        self.assertEqual(wire, [
+            "PetKit wire POST /latest/ctw3/updateSettings api=13.2.1 ua=okhttp/3.14.9 client=android(16.1;23127PN0CG) http=200 error=PetKit Error 97: App is out of date, please upgrade"
+        ])
+        self.assertNotIn("super-secret-token", wire[0])
+
 
 if __name__ == "__main__":
     unittest.main()

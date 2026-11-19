@@ -355,9 +355,9 @@ The PetKit cloud identifies this fountain family as device type <code>CTW3</code
 | `Mode`                    | `Select`        | Standard (continuous flow), intermittent, or battery. Requires the BLE relay. |
 | `Reset filter`            | `Button`        | Requires the BLE relay. |
 
-Power, mode, and filter reset use the same PetKit BLE relay as the other fountains. The opcode bytes and the rule "poll result 1 means connected" come from py-petkit-api. Light, brightness, and do-not-disturb are written with `ctw3/updateSettings` (`id` plus a JSON `kv` object) on the shared `13.2.1` session. A cloud value of `-1` for energy, total pump runtime, or filter days is shown as unavailable.
+Power, mode, and filter reset use the same PetKit BLE relay as the other fountains. The opcode bytes and the rule "poll result 1 means connected" come from py-petkit-api. Light, brightness, and do-not-disturb are written with `ctw3/updateSettings` (`id` plus a JSON `kv` object) on the shared `13.2.1` session. On a Max 2 tested with 0.2.0 those writes still returned `PetKit Error 97`. A cloud value of `-1` for energy, total pump runtime, or filter days is shown as unavailable.
 
-To capture the next hardware trace, set the logger `custom_components.petkit` to `debug`. Warning lines are enough for the command result: they include the request API version, `session=shared`, BLE `type`, poll results, `controlDevice` result, and `mode` / `powerStatus` / `runStatus` / `updateAt` after each read. Tokens, passwords, MAC addresses, and device ids are not written.
+Debug output lists device counts and types. It does not print account, pet, or device payloads. After reload, copy the warning `PetKit login once`. After a light change and a power change, copy every warning that starts with `PetKit wire`. Those lines show the path and the `X-Api-Version`, `User-Agent`, and `X-Client` values that were sent, plus the HTTP status and the PetKit error code. They do not contain the session token.
 </details>
 
 ## Litter Boxes

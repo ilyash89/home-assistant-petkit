@@ -47,6 +47,9 @@ from .ctw3_protocol import (
     regionserver_list,
     sanitize_mapping,
     select_ble_type,
+    state_summary_text,
+    traced_control_request,
+    wire_line,
 )
 
 # Same cadence petkitaio uses before polling a W5 through a BLE relay.
@@ -225,7 +228,7 @@ class ExtendedPetKitClient(PetKitClient):
                 self._last_connect_states,
                 self._last_poll_results,
                 control_result,
-                device_state_summary(fountain.data),
+                state_summary_text(fountain.data),
             )
 
     async def get_api_server_list(self) -> None:
@@ -289,8 +292,12 @@ class ExtendedPetKitClient(PetKitClient):
         url = f"{self.base_url}{Endpoint.LOGIN}"
         host = self.base_url.split("/")[2] if "://" in self.base_url else self.base_url
         LOGGER.warning(
-            "PetKit shared login API %s host=%s region=%s session=shared",
-            CTW3_API_VERSION,
+            "PetKit login once endpoint=%s API=%s oldVersion=%s ua=%s client=%s host=%s region=%s session=shared",
+            Endpoint.LOGIN,
+            header.get("X-Api-Version"),
+            form["oldVersion"],
+            header.get("User-Agent"),
+            header.get("X-Client"),
             host,
             region_id,
         )
@@ -340,8 +347,9 @@ class ExtendedPetKitClient(PetKitClient):
     async def _post(
         self, url: str, headers: dict[str, Any], data: dict[str, Any]
     ) -> dict[str, Any]:
-        """POST and keep a sanitized trace of the shared session."""
+        """POST and record the headers that actually went out on control calls."""
 
+        trace = traced_control_request(url)
         LOGGER.debug(
             "PetKit POST %s headers=%s body=%s",
             url.split("?")[0],
@@ -349,7 +357,26 @@ class ExtendedPetKitClient(PetKitClient):
             sanitize_mapping(data or {}),
         )
         try:
-            return await super()._post(url, headers, data)
+            async with self._session.post(
+                url, headers=headers, data=data, timeout=self.timeout
+            ) as resp:
+                try:
+                    body = await PetKitClient._response(resp)
+                except PetKitError as err:
+                    if trace:
+                        LOGGER.warning(
+                            "%s",
+                            wire_line("POST", url, headers, resp.status, f"error={err}"),
+                        )
+                    raise
+                if trace:
+                    LOGGER.warning(
+                        "%s",
+                        wire_line("POST", url, headers, resp.status, "result=ok"),
+                    )
+                return body
+        except PetKitError:
+            raise
         except Exception as err:
             LOGGER.warning("PetKit POST %s failed: %s", url.split("?")[0], err)
             raise
@@ -414,11 +441,15 @@ class ExtendedPetKitClient(PetKitClient):
                     {"id": fountain.id},
                 )
             except Exception:  # noqa: BLE001 - the command already went out
-                LOGGER.debug("CTW3 deviceData refresh failed for %s", fountain.id, exc_info=True)
+                LOGGER.debug("CTW3 deviceData refresh failed", exc_info=True)
                 continue
             result = response.get("result")
             if not isinstance(result, dict):
-                LOGGER.warning("CTW3 deviceData#%s was not an object: %s", attempt, result)
+                LOGGER.warning(
+                    "CTW3 deviceData#%s was not an object: %s",
+                    attempt,
+                    type(result).__name__,
+                )
                 continue
             payload = normalize_ctw3_payload(result)
             if model:
@@ -428,7 +459,7 @@ class ExtendedPetKitClient(PetKitClient):
             LOGGER.warning(
                 "CTW3 deviceData#%s %s",
                 attempt,
-                device_state_summary(payload),
+                state_summary_text(payload),
             )
             if expectation_met(payload, expect):
                 return
@@ -438,7 +469,7 @@ class ExtendedPetKitClient(PetKitClient):
                 "controlDevice result 1 means the relay accepted the packet, "
                 "not that deviceData has changed.",
                 expect,
-                device_state_summary(latest),
+                state_summary_text(latest),
             )
 
     async def _load_ctw3_fountains(self) -> dict[int, W5Fountain]:
@@ -615,7 +646,7 @@ class ExtendedPetKitClient(PetKitClient):
         ble_data = {"bleId": ble_id, "mac": mac, "type": ble_type}
         connected = await self._open_ble(header, ble_data, poll_attempts=3)
         if not connected:
-            LOGGER.debug("CTW3 BLE refresh did not connect for %s", device_id)
+            LOGGER.debug("CTW3 BLE refresh did not connect")
             return payload, relay_type_code
         try:
             await asyncio.sleep(2)
@@ -647,7 +678,7 @@ class ExtendedPetKitClient(PetKitClient):
                 {"groupId": group_id},
             )
         except Exception:  # noqa: BLE001
-            LOGGER.debug("Could not list BLE relays for CTW3 %s", device.get("id"), exc_info=True)
+            LOGGER.debug("Could not list BLE relays for CTW3", exc_info=True)
             self._relay_online_without_code = False
             return None
         relay_codes = self._relay_type_codes
