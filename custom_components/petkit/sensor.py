@@ -37,6 +37,8 @@ from .const import (
     PURIFIERS,
     WATER_FOUNTAINS
 )
+from .ctw3_protocol import CTW3_TYPE
+from .max2 import max2_sensors
 from .coordinator import PetKitDataUpdateCoordinator
 from .litter_events import (
     EVENT_DESCRIPTION,
@@ -58,6 +60,9 @@ async def async_setup_entry(
     sensors = []
 
     for wf_id, wf_data in coordinator.data.water_fountains.items():
+        if wf_data.type == CTW3_TYPE:
+            sensors.extend(max2_sensors(coordinator, wf_id))
+            continue
         # Water Fountains (W5)
         sensors.extend((
             WFEnergyUse(coordinator, wf_id),

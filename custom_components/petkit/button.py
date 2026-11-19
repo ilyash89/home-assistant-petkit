@@ -29,7 +29,9 @@ from .const import (
     WATER_FOUNTAINS
 )
 from .coordinator import PetKitDataUpdateCoordinator
+from .ctw3_protocol import CTW3_TYPE
 from .exceptions import PetKitBluetoothError
+from .max2 import max2_buttons
 
 
 async def async_setup_entry(
@@ -42,6 +44,9 @@ async def async_setup_entry(
     buttons = []
 
     for wf_id, wf_data in coordinator.data.water_fountains.items():
+        if wf_data.type == CTW3_TYPE:
+            buttons.extend(max2_buttons(coordinator, wf_id))
+            continue
         # Water Fountains (W5)
         if wf_data.group_relay and coordinator.client.use_ble_relay:
             buttons.append(

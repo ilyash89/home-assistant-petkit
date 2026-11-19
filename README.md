@@ -54,6 +54,7 @@ Join the Home Assistant PetKit discord server to follow development news or to s
 - [Eversweet 3 Pro Water Fountain](https://www.amazon.com/PETKIT-Wireless-Fountain-Stainless-Dispenser/dp/B09QRH6L3M/)
 - [Eversweet 3 Pro (UVC Version) Water Fountain](https://petkit.com/products/eversweet-3-pro-wireless-pump-uvc)
 - [Eversweet 5 Mini Water Fountain](https://www.petkit.nl/products/eversweet-5-mini-binnen-2-weken-geleverd)
+- [Eversweet Max 2 Water Fountain](https://www.petkit.com/products/eversweet-max-2-uvc-pet-water-fountain) (cloud type `CTW3`; the cordless and UVC versions share this type with the earlier Eversweet Max)
 
 
 
@@ -315,6 +316,44 @@ Each water fountain has the following entities:
 
 
 >  If you have the BLE relay set up in the PetKit app and the main BLE relay device is online, sometimes the bluetooth connection will fail when attempting to send a command (e.g., changing mode, light brightness, etc) . If this happens, it will be noted in the Home Assistant logs. Retrying the command usually results in a subsequent successful connection.
+</details>
+
+<details>
+  <summary> <b>Eversweet Max / Max 2</b> (<i>click to expand</i>)</summary>
+  <!---->
+<br/>
+The PetKit cloud identifies this fountain family as device type <code>CTW3</code>. Eversweet Max, Max 2, and the UVC versions that advertise as <code>Petkit_CTW3*</code> share that type. When the account catalog returns a marketing name, that name is used as the device model. Otherwise the device is shown as <code>Eversweet Max / Max 2</code>.
+<br/><br/>
+
+| Entity                    | Entity Type     | Additional Comments |
+|---------------------------|-----------------|---------------------|
+| `Water level`             | `Binary Sensor` | On when the fountain reports that water needs to be added. |
+| `Low battery`             | `Binary Sensor` | |
+| `Filter warning`          | `Binary Sensor` | |
+| `Breakdown`               | `Binary Sensor` | |
+| `Pet detected`            | `Binary Sensor` | Reported when the cloud payload includes `detectStatus`. |
+| `Night do not disturb`    | `Binary Sensor` | On while the fountain is currently inside its do-not-disturb window. |
+| `Battery`                 | `Sensor`        | Battery percent from `electricity.batteryPercent`. |
+| `Pump status`             | `Sensor`        | `Running` or `Stopped` from `runStatus`. |
+| `Filter`                  | `Sensor`        | Percent of filter life left. |
+| `Filter days remaining`   | `Sensor`        | |
+| `Energy usage`            | `Sensor`        | Uses `todayUseElectricity` when the cloud sends it, otherwise the same pump-time estimate as the other fountains. |
+| `Purified water today`    | `Sensor`        | Same derived count as the other Eversweet fountains. |
+| `Pump runtime today`      | `Sensor`        | |
+| `Pump runtime total`      | `Sensor`        | |
+| `Last data update`        | `Sensor`        | |
+| `Smart mode work time`    | `Sensor`        | Minutes. Read-only. |
+| `Smart mode sleep time`   | `Sensor`        | Minutes. Read-only. |
+| `Battery mode work time`  | `Sensor`        | Seconds. Read-only. |
+| `Battery mode sleep time` | `Sensor`        | Seconds. Read-only. |
+| `Light`                   | `Switch`        | Cloud setting. Does not need the BLE relay. |
+| `Light brightness`        | `Select`        | Low / medium / high. Cloud setting, available while the light is on. |
+| `Do not disturb`          | `Switch`        | Turns the feature on or off. The schedule is still set in the PetKit app. Cloud setting. |
+| `Power`                   | `Switch`        | On/off through the BLE relay. The current mode is sent with the command so it is not rewritten. |
+| `Mode`                    | `Select`        | Standard (continuous flow), intermittent, or battery. Requires the BLE relay. |
+| `Reset filter`            | `Button`        | Requires the BLE relay. |
+
+Power, mode, and filter reset use the same PetKit BLE relay as the other fountains. Light, brightness, and do-not-disturb are written with `ctw3/updateSettings` and do not open the relay. These commands were taken from the public PetKit client libraries and have not been checked against a physical Max 2 in this repository.
 </details>
 
 ## Litter Boxes
