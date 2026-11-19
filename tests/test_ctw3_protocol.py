@@ -160,6 +160,50 @@ class Ctw3ProtocolTest(unittest.TestCase):
         self.assertEqual(cleaned["id"], "present")
         self.assertEqual(cleaned["mac"], "present")
         self.assertEqual(cleaned["cmd"], "220")
+        line = _PROTOCOL.wire_line(
+            "POST",
+            "https://api.eu-pet.com/latest/ctw3/updateSettings?x=1",
+            {
+                "X-Api-Version": "13.2.1",
+                "User-Agent": "okhttp/3.14.9",
+                "X-Client": "android(16.1;23127PN0CG)",
+                "X-Session": "super-secret-token",
+            },
+            200,
+            "error=PetKit Error 97: App is out of date, please upgrade",
+        )
+        self.assertIn("POST /latest/ctw3/updateSettings", line)
+        self.assertIn("api=13.2.1", line)
+        self.assertIn("http=200", line)
+        self.assertNotIn("super-secret-token", line)
+        self.assertNotIn("?", line)
+        self.assertEqual(
+            _PROTOCOL.redact_text('{"name": "Nala", "mac": "aa:bb:cc:dd:ee:ff"}'),
+            "redacted payload",
+        )
+        self.assertNotIn(
+            "owner@example.com",
+            _PROTOCOL.redact_text("login owner@example.com id 123456789"),
+        )
+
+        class _Item:
+            def __init__(self, device_type: str, name: str) -> None:
+                self.type = device_type
+                self.name = name
+
+        class _Data:
+            feeders = {1: _Item("d4", "Kitchen")}
+            litter_boxes = {}
+            water_fountains = {2: _Item("ctw3", "Fountain")}
+            purifiers = {}
+            pets = {3: _Item("pet", "Nala")}
+
+        summary = _PROTOCOL.account_debug_summary(_Data())
+        self.assertIn("feeders=1 types=d4", summary)
+        self.assertIn("water_fountains=1 types=ctw3", summary)
+        self.assertIn("pets=1 types=pet", summary)
+        self.assertNotIn("Nala", summary)
+        self.assertNotIn("Kitchen", summary)
         self.assertEqual(
             device_state_summary(
                 {"mode": 1, "powerStatus": 1, "runStatus": 0, "updateAt": 5, "settings": {}}

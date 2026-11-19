@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from datetime import timedelta
-import json
 
 from petkitaio.exceptions import AuthError, PetKitError, RegionError, ServerError
 from petkitaio.model import PetKitData
@@ -25,6 +24,7 @@ from .const import (
     USE_BLE_RELAY,
 )
 from .ctw3 import ExtendedPetKitClient
+from .ctw3_protocol import account_debug_summary
 
 
 class PetKitDataUpdateCoordinator(DataUpdateCoordinator):
@@ -64,8 +64,7 @@ class PetKitDataUpdateCoordinator(DataUpdateCoordinator):
 
         try:
             data = await self.client.get_petkit_data()
-            nl = '\n'
-            LOGGER.debug(f'Found the following PetKit devices/pets: {nl}{json.dumps(data, default=vars, indent=4)}')
+            LOGGER.debug("PetKit account summary %s", account_debug_summary(data))
         except TypeError:
             LOGGER.debug('Encountered TypeError while formatting returned PetKit devices for logging.')
             return data

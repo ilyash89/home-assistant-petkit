@@ -10,7 +10,10 @@ from petkitaio.constants import W5Command, PurifierCommand
 
 from homeassistant.const import Platform
 
+from .ctw3_protocol import install_log_redaction
+
 LOGGER = logging.getLogger(__package__)
+install_log_redaction()
 
 
 DOMAIN = "petkit"

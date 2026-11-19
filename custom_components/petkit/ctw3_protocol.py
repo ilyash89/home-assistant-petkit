@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime
+import logging
+import re
 import urllib.parse
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -37,9 +39,11 @@ BLE_END = [251]
 CMD_POWER_MODE = 220
 CMD_RESET_FILTER = 222
 
-# py-petkit-api Header / Client (API 13.2.1). The one account login uses
-# these values. petkitaio 0.1.12 would otherwise sign in as iOS 11.2.1, and
-# that session is what made CTW3 settings return Error 97.
+# py-petkit-api 1.31.1 (main, November 2026) still sends API 13.2.1.
+# The store app on 19 Nov 2026 is 14.0.1 on Android and iOS. No public
+# 14.x login body was found, so this session stays on the py-petkit-api
+# identity. A live Max 2 still returned Error 97 on ctw3/updateSettings
+# after a 13.2.1 login. The wire log records the headers actually sent.
 CTW3_API_VERSION = "13.2.1"
 CTW3_USER_AGENT = "okhttp/3.14.9"
 CTW3_CLIENT = "android(16.1;23127PN0CG)"
@@ -414,6 +418,113 @@ _SECRET_KEYS = {
     "username",
     "groupid",
 }
+
+
+def request_path(url: str) -> str:
+    """Path only, so a log line does not need the host or query."""
+
+    path = urllib.parse.urlparse(url).path
+    return path or url
+
+
+def traced_control_request(url: str) -> bool:
+    """Settings writes and BLE control are the calls the next trace must show."""
+
+    path = request_path(url)
+    return path.endswith("/updateSettings") or path.endswith("/ble/controlDevice")
+
+
+def wire_line(
+    method: str,
+    url: str,
+    headers: dict[str, Any] | None,
+    http_status: int | None,
+    outcome: str,
+) -> str:
+    """One line for the request that actually left, without the session token."""
+
+    sent = headers or {}
+    return (
+        f"PetKit wire {method} {request_path(url)} "
+        f"api={sent.get('X-Api-Version')} ua={sent.get('User-Agent')} "
+        f"client={sent.get('X-Client')} http={http_status} {outcome}"
+    )
+
+
+_EMAIL = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+_MAC = re.compile(r"\b[0-9A-F]{2}(?::[0-9A-F]{2}){5}\b", re.IGNORECASE)
+_LONG_ID = re.compile(r"\b\d{6,}\b")
+
+
+def redact_text(text: str) -> str:
+    """Remove account payloads, addresses, and long ids from a log line."""
+
+    if "{" in text and ('"' in text or "'" in text):
+        return "redacted payload"
+    text = _EMAIL.sub("[redacted-email]", text)
+    text = _MAC.sub("[redacted-mac]", text)
+    return _LONG_ID.sub("[redacted-id]", text)
+
+
+class PayloadRedactionFilter(logging.Filter):
+    """Drop raw JSON from the petkitaio logger and mask ids everywhere else."""
+
+    def __init__(self, blank_payloads: bool) -> None:
+        super().__init__()
+        self.blank_payloads = blank_payloads
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            rendered = record.getMessage()
+        except Exception:
+            return True
+        if self.blank_payloads and "{" in rendered and ('"' in rendered or "'" in rendered):
+            cleaned = "redacted payload"
+        else:
+            cleaned = _EMAIL.sub("[redacted-email]", rendered)
+            cleaned = _MAC.sub("[redacted-mac]", cleaned)
+            cleaned = _LONG_ID.sub("[redacted-id]", cleaned)
+        if cleaned != rendered:
+            record.msg = cleaned
+            record.args = ()
+        return True
+
+
+def install_log_redaction() -> None:
+    """Attach redaction once. Only the library logger blanks whole payloads."""
+
+    targets = (
+        ("petkitaio", True),
+        ("custom_components.petkit", False),
+    )
+    for name, blank_payloads in targets:
+        target = logging.getLogger(name)
+        if any(isinstance(item, PayloadRedactionFilter) for item in target.filters):
+            continue
+        target.addFilter(PayloadRedactionFilter(blank_payloads))
+
+
+def state_summary_text(payload: dict[str, Any]) -> str:
+    """Flat state line. No braces, so it stays readable after redaction."""
+
+    return " ".join(f"{key}={value}" for key, value in device_state_summary(payload).items())
+
+
+def account_debug_summary(data: Any) -> str:
+    """Counts and device types only. No names, pets, ids, or raw records."""
+
+    parts: list[str] = []
+    for label in ("feeders", "litter_boxes", "water_fountains", "purifiers", "pets"):
+        mapping = getattr(data, label, None) or {}
+        types = sorted(
+            {
+                str(getattr(item, "type", "pet"))
+                for item in mapping.values()
+                if item is not None
+            }
+        )
+        parts.append(f"{label}={len(mapping)} types={','.join(types) or '-'}")
+    return " ".join(parts)
 
 
 def sanitize_mapping(value: Any) -> Any:
