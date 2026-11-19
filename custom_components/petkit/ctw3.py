@@ -9,8 +9,7 @@ other device and adds the Max family beside those results.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
-import hashlib
+from datetime import datetime
 import json
 from typing import Any
 
@@ -22,7 +21,6 @@ from petkitaio.model import W5Fountain
 from .const import LOGGER
 from .ctw3_protocol import (
     BLE_POLL_ERROR,
-    CHINA_GATEWAY,
     CTW3_DATA_ENDPOINT,
     CTW3_MODEL_FALLBACK,
     CTW3_SETTINGS_ENDPOINT,
@@ -36,13 +34,9 @@ from .ctw3_protocol import (
     encode_ble_frame,
     expectation_met,
     flatten_device_catalog,
-    gateway_for_region,
     is_ctw3_type,
     model_name_from_catalog,
-    modern_login_form,
     normalize_ctw3_payload,
-    PASSPORT_REGION_SERVERS,
-    regionserver_list,
     sanitize_mapping,
     select_ble_type,
 )
@@ -69,9 +63,6 @@ class ExtendedPetKitClient(PetKitClient):
         self._relay_online_without_code = False
         self._device_catalog: list[dict[str, Any]] | None = None
         self._ctw3_ble_counter: dict[int, int] = {}
-        self._control_token: str | None = None
-        self._control_token_expiration: datetime | None = None
-        self._control_base_url: str | None = None
         self._last_poll_results: list[Any] = []
         self._last_connect_states: list[Any] = []
 
@@ -109,11 +100,13 @@ class ExtendedPetKitClient(PetKitClient):
         object for ``DeviceCommand.UPDATE_SETTING``.
         """
 
-        header, base_url = await self._control_header()
+        header = await self._ctw3_header()
+        base_url = self.base_url
         url = f"{base_url}{CTW3_SETTINGS_ENDPOINT}"
         body = {"id": fountain.id, "kv": json.dumps(settings)}
         LOGGER.warning(
-            "CTW3 settings write keys=%s session=api-%s",
+            "CTW3 settings write keys=%s header=api-%s session=shared. "
+            "The account login is still petkitaio 11.2.1, so this call may return Error 97.",
             settings,
             header.get("X-Api-Version"),
         )
@@ -149,7 +142,8 @@ class ExtendedPetKitClient(PetKitClient):
                 f'BLE type for {fountain.data.get("name", fountain.id)} is unknown, '
                 "so the command was not sent."
             )
-        header, base_url = await self._control_header()
+        header = await self._ctw3_header()
+        base_url = self.base_url
         ble_data = {
             "bleId": fountain.data["id"],
             "mac": fountain.data["mac"],
@@ -164,7 +158,7 @@ class ExtendedPetKitClient(PetKitClient):
             "type": ble_type,
         }
         LOGGER.warning(
-            "CTW3 BLE start cmd=%s type=%s type_source=%s counter=%s bytes=%s session=api-%s",
+            "CTW3 BLE start cmd=%s type=%s type_source=%s counter=%s bytes=%s header=api-%s session=shared",
             command_data["cmd"],
             ble_type,
             fountain.data.get("_ble_type_source", "not recorded"),
@@ -228,118 +222,14 @@ class ExtendedPetKitClient(PetKitClient):
             )
 
     async def _ctw3_header(self) -> dict[str, str]:
-        """Headers for background CTW3 reads. The shared login is left as-is."""
+        """CTW3 headers on the single shared petkitaio session.
 
-        return ctw3_request_headers(await self.create_header(), self.tz)
-
-    async def _control_header(self) -> tuple[dict[str, str], str]:
-        """Headers and base URL for a CTW3 write.
-
-        The shared petkitaio session was created as app 11.2.1. Putting
-        13.2.1 on that session still returns Error 97, so commands use a
-        second login that matches py-petkit-api. The original token is not
-        replaced.
+        The token is the one ``create_header()`` already uses for feeders,
+        litter boxes, purifiers, and W5 fountains. Version and client fields
+        on the CTW3 request are overlaid. There is no second login.
         """
 
-        await self._ensure_control_session()
-        header = ctw3_request_headers(
-            {
-                "Accept": "*/*",
-                "Accept-Language": "en-US;q=1, it-US;q=0.9",
-                "Accept-Encoding": "gzip, deflate",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "X-Session": self._control_token or "",
-                "F-Session": self._control_token or "",
-            },
-            self.tz,
-        )
-        return header, self._control_base_url or self.base_url
-
-    async def _ensure_control_session(self) -> None:
-        """Log in once as API 13.2.1 without touching the petkitaio token."""
-
-        now = datetime.now()
-        if (
-            self._control_token
-            and self._control_token_expiration
-            and self._control_token_expiration > now + timedelta(seconds=60)
-        ):
-            return
-        saved_token = self.token
-        gateway, region_id = await self._control_gateway()
-        form = modern_login_form(
-            self.username,
-            hashlib.md5(self.password.encode()).hexdigest(),
-            region_id,
-            self.tz,
-        )
-        header = ctw3_request_headers(
-            {
-                "Accept": "*/*",
-                "Accept-Language": "en-US;q=1, it-US;q=0.9",
-                "Accept-Encoding": "gzip, deflate",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-            self.tz,
-        )
-        url = f"{gateway}user/login"
-        LOGGER.warning(
-            "CTW3 opening a separate API %s session at %s region=%s. "
-            "The petkitaio session is left in place. If other devices then "
-            "stop updating, PetKit allowed only one session and this login replaced it.",
-            header.get("X-Api-Version"),
-            gateway.split("/")[2] if "://" in gateway else gateway,
-            region_id,
-        )
-        response = await self._exchange("login", url, header, form)
-        session = (response.get("result") or {}).get("session") or {}
-        token = session.get("id")
-        if not token:
-            raise PetKitError("CTW3 modern login did not return a session")
-        self._control_token = token
-        self._control_base_url = gateway
-        expires_in = int(session.get("expiresIn") or 3600)
-        self._control_token_expiration = now + timedelta(seconds=expires_in)
-        if self.token != saved_token:
-            self.token = saved_token
-
-    async def _control_gateway(self) -> tuple[str, str]:
-        """Resolve the same country to the current PetKit gateway."""
-
-        if str(self.region).lower() in {"china", "cn"}:
-            # py-petkit-api skips the region list for China and sends the
-            # configured country name as the login region.
-            return CHINA_GATEWAY, str(self.region).lower()
-        header = ctw3_request_headers(
-            {
-                "Accept": "*/*",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-            self.tz,
-        )
-        try:
-            response = await self._exchange(
-                "regionservers", PASSPORT_REGION_SERVERS, header, None, method="GET"
-            )
-            match = gateway_for_region(regionserver_list(response), self.region)
-            if match:
-                return match[0], match[1].lower()
-            LOGGER.warning(
-                "CTW3 v1 regionservers had no entry named %s; using the gateway from the existing login",
-                self.region,
-            )
-        except Exception:  # noqa: BLE001 - fall back to the gateway petkitaio already uses
-            LOGGER.warning("CTW3 v1 regionservers lookup failed", exc_info=True)
-        known = self.servers_dict.get(self.region) or {}
-        gateway = known.get("url") or self.base_url
-        region_id = known.get("id")
-        if not gateway or not region_id:
-            raise PetKitError(
-                f"CTW3 could not resolve a PetKit gateway for region {self.region}"
-            )
-        if not str(gateway).endswith("/"):
-            gateway = f"{gateway}/"
-        return str(gateway), str(region_id)
+        return ctw3_request_headers(await self.create_header(), self.tz)
 
     async def _exchange(
         self,

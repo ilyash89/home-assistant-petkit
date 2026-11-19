@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
 import importlib
 import sys
 import types
@@ -178,10 +177,11 @@ class Ctw3ClientTest(unittest.IsolatedAsyncioTestCase):
 
         self.client._post = post
         self.client.token = "legacy-token"
-        self.client._control_token = "modern-token"
-        self.client._control_token_expiration = datetime.now() + timedelta(hours=5)
-        self.client._control_base_url = self.client.base_url
-        session_header = {"X-Session": "token", "X-Api-Version": "11.2.1"}
+        session_header = {
+            "X-Session": "token",
+            "F-Session": "token",
+            "X-Api-Version": "11.2.1",
+        }
         self.client.create_header = AsyncMock(return_value=session_header)
 
         await self.client.update_ctw3_settings(fountain, {"lampRingSwitch": 1})
@@ -191,9 +191,11 @@ class Ctw3ClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(posts[0][1]["id"], 10)
         self.assertEqual(posts[0][1]["kv"], '{"lampRingSwitch": 1}')
         self.assertEqual(posts[0][2]["X-Api-Version"], "13.2.1")
-        self.assertEqual(posts[0][2]["X-Session"], "modern-token")
+        self.assertEqual(posts[0][2]["X-Session"], "token")
+        self.assertEqual(posts[0][2]["F-Session"], "token")
         self.assertEqual(posts[0][2]["X-Locale"], "en-US")
         self.assertEqual(self.client.token, "legacy-token")
+        self.assertFalse(any("user/login" in url for url, _data, _header in posts))
         self.assertEqual(session_header["X-Api-Version"], "11.2.1")
         self.assertEqual(fountain.data["settings"]["lampRingSwitch"], 1)
         control_index = next(
@@ -225,53 +227,6 @@ class Ctw3ClientTest(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(PetKitError):
             await self.client.send_ctw3_command(bare, [222, 1, 0, 0])
-
-    async def test_modern_login_leaves_the_petkitaio_token(self) -> None:
-        self.client.token = "legacy-token"
-        self.client.region = "Germany"
-        seen: list[tuple[str, str, dict]] = []
-
-        async def get(url, header):
-            seen.append(("GET", url, header))
-            return {
-                "result": {
-                    "list": [
-                        {
-                            "name": "Germany",
-                            "id": "DE",
-                            "gateway": "https://api.eu-pet.com/latest/",
-                        }
-                    ]
-                }
-            }
-
-        async def post(url, header, data):
-            seen.append(("POST", url, data))
-            return {
-                "result": {
-                    "session": {"id": "new-token", "userId": "u", "expiresIn": 7200}
-                }
-            }
-
-        self.client._get = get
-        self.client._post = post
-
-        header, base_url = await self.client._control_header()
-
-        self.assertEqual(self.client.token, "legacy-token")
-        self.assertEqual(header["X-Session"], "new-token")
-        self.assertEqual(header["F-Session"], "new-token")
-        self.assertEqual(header["X-Api-Version"], "13.2.1")
-        self.assertEqual(header["X-TimezoneId"], "UTC")
-        self.assertEqual(base_url, "https://api.eu-pet.com/latest/")
-        login = next(item for item in seen if item[0] == "POST")
-        self.assertEqual(login[1], "https://api.eu-pet.com/latest/user/login")
-        self.assertEqual(login[2]["oldVersion"], "13.2.1")
-        self.assertEqual(login[2]["region"], "de")
-        self.assertIn("13.2.1", login[2]["client"])
-        self.assertNotEqual(login[2]["password"], "secret")
-        regions = next(item for item in seen if item[0] == "GET")
-        self.assertEqual(regions[1], "https://passport.petkt.com/v1/regionservers")
 
 
 if __name__ == "__main__":

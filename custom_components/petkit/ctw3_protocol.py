@@ -37,9 +37,10 @@ BLE_END = [251]
 CMD_POWER_MODE = 220
 CMD_RESET_FILTER = 222
 
-# py-petkit-api Header / Client (API 13.2.1). petkitaio 0.1.12 still sends
-# 11.2.1, and the Max 2 cloud rejects settings writes from that client with
-# Error 97 ("App is out of date"). These values are applied only to CTW3 calls.
+# py-petkit-api Header / Client (API 13.2.1). petkitaio 0.1.12 logs in as
+# 11.2.1. Putting these headers on that same session does not clear Error 97
+# on CTW3 settings writes. CTW3 calls still send them so the log shows the
+# request identity. The account keeps a single login.
 CTW3_API_VERSION = "13.2.1"
 CTW3_USER_AGENT = "okhttp/3.14.9"
 CTW3_CLIENT = "android(16.1;23127PN0CG)"
@@ -312,11 +313,6 @@ def command_code(command: list[int]) -> str:
     return str(command[0])
 
 
-# py-petkit-api logs in through passport ``v1/regionservers`` and sends this
-# client blob. petkitaio 0.1.12 logs in as iOS 11.2.1; a 13.2.1 header on that
-# older session still gets Error 97 on CTW3 writes.
-PASSPORT_REGION_SERVERS = "https://passport.petkt.com/v1/regionservers"
-CHINA_GATEWAY = "https://api.petkit.cn/6/"
 _SECRET_KEYS = {
     "password",
     "client",
@@ -330,80 +326,6 @@ _SECRET_KEYS = {
     "username",
     "groupid",
 }
-
-
-def modern_client_blob(timezone: str | None) -> dict[str, str]:
-    """Client object py-petkit-api puts in the login form."""
-
-    return {
-        "locale": "en-US",
-        "name": "23127PN0CG",
-        "osVersion": "16.1",
-        "phoneBrand": "Xiaomi",
-        "platform": "android",
-        "source": "app.petkit-android",
-        "version": CTW3_API_VERSION,
-        "timezoneId": timezone or "UTC",
-        "timezone": timezone_offset(timezone),
-    }
-
-
-def modern_login_form(
-    username: str,
-    password_md5: str,
-    region_id: str,
-    timezone: str | None,
-) -> dict[str, str]:
-    """Login form body. ``client`` is a Python dict string, as both libraries send."""
-
-    return {
-        "client": str(modern_client_blob(timezone)),
-        "encrypt": "1",
-        "oldVersion": CTW3_API_VERSION,
-        "password": password_md5,
-        "region": region_id,
-        "username": username,
-    }
-
-
-def gateway_for_region(
-    servers: Any, region_name: str | None
-) -> tuple[str, str] | None:
-    """Return ``(gateway, region id)`` from a regionservers list."""
-
-    if isinstance(servers, dict):
-        servers = servers.get("list") or servers.get("result") or []
-    if not isinstance(servers, list) or not region_name:
-        return None
-    wanted = region_name.strip().lower()
-    for server in servers:
-        if not isinstance(server, dict):
-            continue
-        name = str(server.get("name", "")).strip().lower()
-        region_id = str(server.get("id", "")).strip()
-        if wanted not in {name, region_id.lower()}:
-            continue
-        gateway = str(server.get("gateway") or "")
-        if gateway and not gateway.endswith("/"):
-            gateway += "/"
-        if gateway and region_id:
-            return gateway, region_id.lower()
-    return None
-
-
-def regionserver_list(response: Any) -> list[Any]:
-    """Accept either the raw JSON body or an already unwrapped result."""
-
-    if not isinstance(response, dict):
-        return []
-    result = response.get("result", response)
-    if isinstance(result, dict):
-        listing = result.get("list")
-        if isinstance(listing, list):
-            return listing
-    if isinstance(result, list):
-        return result
-    return []
 
 
 def sanitize_mapping(value: Any) -> Any:

@@ -353,9 +353,9 @@ The PetKit cloud identifies this fountain family as device type <code>CTW3</code
 | `Mode`                    | `Select`        | Standard (continuous flow), intermittent, or battery. Requires the BLE relay. |
 | `Reset filter`            | `Button`        | Requires the BLE relay. |
 
-Power, mode, and filter reset use the same PetKit BLE relay as the other fountains. The opcode bytes and the rule "poll result 1 means connected" come from py-petkit-api. Light, brightness, and do-not-disturb are written with `ctw3/updateSettings`. Those writes use a separate login as API `13.2.1` (the same client blob as py-petkit-api). The session used for every other device stays on petkitaio `11.2.1`. A cloud value of `-1` for energy, total pump runtime, or filter days is shown as unavailable.
+Power, mode, and filter reset use the same PetKit BLE relay as the other fountains. The opcode bytes and the rule "poll result 1 means connected" come from py-petkit-api. Light, brightness, and do-not-disturb are written with `ctw3/updateSettings` (`id` plus a JSON `kv` object). Every device, including this fountain, uses the one petkitaio login. A CTW3 request adds API `13.2.1` headers on that same session. On a Max 2 those light and do-not-disturb writes still return `PetKit Error 97`, because the login itself is API `11.2.1`. A cloud value of `-1` for energy, total pump runtime, or filter days is shown as unavailable.
 
-To capture the next hardware trace, set the logger `custom_components.petkit` to `debug`. Warning lines are enough for the command result: they include the API version, BLE `type`, poll results, `controlDevice` result, and `mode` / `powerStatus` / `runStatus` / `updateAt` after each read. Tokens, passwords, MAC addresses, and device ids are not written.
+To capture the next hardware trace, set the logger `custom_components.petkit` to `debug`. Warning lines are enough for the command result: they include the request API version, `session=shared`, BLE `type`, poll results, `controlDevice` result, and `mode` / `powerStatus` / `runStatus` / `updateAt` after each read. Tokens, passwords, MAC addresses, and device ids are not written.
 </details>
 
 ## Litter Boxes
