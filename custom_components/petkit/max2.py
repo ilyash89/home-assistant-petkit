@@ -38,10 +38,10 @@ from .ctw3_protocol import (
     CTW3_MODE_OPTIONS,
     CTW3_MODEL_FALLBACK,
     CTW3_MODES,
-    MODE_STANDARD,
     SETTING_BRIGHTNESS,
     SETTING_DND,
     SETTING_LIGHT,
+    known_number,
     mode_command,
     power_command,
     reset_filter_command,
@@ -59,20 +59,22 @@ def _settings(data: dict[str, Any]) -> dict[str, Any]:
 def _energy_kwh(data: dict[str, Any]) -> float | None:
     """Prefer the cloud kWh field; otherwise use the same W5 pump formula."""
 
-    direct = data.get("todayUseElectricity")
-    if isinstance(direct, (int, float)):
+    if "todayUseElectricity" in data:
+        direct = known_number(data.get("todayUseElectricity"))
+        if direct is None:
+            return None
         return round(float(direct), 4)
-    runtime = data.get("todayPumpRunTime")
-    if isinstance(runtime, (int, float)):
-        return round((0.75 * float(runtime)) / 3_600_000, 4)
-    return None
+    runtime = known_number(data.get("todayPumpRunTime"))
+    if runtime is None:
+        return None
+    return round((0.75 * float(runtime)) / 3_600_000, 4)
 
 
 def _purified_count(data: dict[str, Any]) -> int | None:
     """Same derived count the other Eversweet entities expose."""
 
-    runtime = data.get("todayPumpRunTime")
-    if not isinstance(runtime, (int, float)):
+    runtime = known_number(data.get("todayPumpRunTime"))
+    if runtime is None:
         return None
     return int(((1.5 * float(runtime)) / 60) / 2.0)
 
@@ -98,10 +100,7 @@ def _pump_status(data: dict[str, Any]) -> str | None:
 
 def _number(data: dict[str, Any], key: str, nested: str | None = None) -> int | float | None:
     source = _settings(data) if nested == "settings" else data
-    value = source.get(key)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return value
+    return known_number(source.get(key))
 
 
 class Max2Entity(CoordinatorEntity):
@@ -184,11 +183,11 @@ _SENSOR_SPECS: tuple[_SensorSpec, ...] = (
     _SensorSpec(
         "_filter_percent",
         "filter",
-        lambda data: data.get("filterPercent") if isinstance(data.get("filterPercent"), (int, float)) else None,
+        lambda data: _number(data, "filterPercent"),
         unit=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         icon=lambda data: "mdi:filter-off" if data.get("filterPercent") == 0 else "mdi:filter",
-        present=lambda data: isinstance(data.get("filterPercent"), (int, float)),
+        present=_has("filterPercent"),
     ),
     _SensorSpec(
         "_purified_water",
@@ -449,10 +448,10 @@ class _Max2Control(Max2Entity):
                 "it may temporarily be offline."
             )
 
-    async def _send_ble(self, command: list[int]) -> None:
+    async def _send_ble(self, command: list[int], expect: dict[str, Any] | None = None) -> None:
         self._require_relay()
         try:
-            await self.coordinator.client.send_ctw3_command(self.wf_data, command)
+            await self.coordinator.client.send_ctw3_command(self.wf_data, command, expect)
         except BluetoothError as err:
             raise PetKitBluetoothError(
                 f"Bluetooth connection to {self._name()} failed. Please try again."
@@ -468,12 +467,6 @@ class _Max2Control(Max2Entity):
         self.async_write_ha_state()
         await asyncio.sleep(1)
         await self.coordinator.async_request_refresh()
-
-    def _current_mode(self) -> int:
-        mode = self.wf_data.data.get("mode")
-        if mode in CTW3_MODES:
-            return mode
-        return MODE_STANDARD
 
 
 class Max2Light(_Max2Control, SwitchEntity):
@@ -499,12 +492,10 @@ class Max2Light(_Max2Control, SwitchEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self._write_setting(SETTING_LIGHT, 1)
-        _settings(self.wf_data.data)[SETTING_LIGHT] = 1
         await self._settle()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self._write_setting(SETTING_LIGHT, 0)
-        _settings(self.wf_data.data)[SETTING_LIGHT] = 0
         await self._settle()
 
 
@@ -532,17 +523,15 @@ class Max2DoNotDisturb(_Max2Control, SwitchEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self._write_setting(SETTING_DND, 1)
-        _settings(self.wf_data.data)[SETTING_DND] = 1
         await self._settle()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self._write_setting(SETTING_DND, 0)
-        _settings(self.wf_data.data)[SETTING_DND] = 0
         await self._settle()
 
 
 class Max2Power(_Max2Control, SwitchEntity):
-    """Fountain power. Off sends CMD 220 with state 0 and keeps the mode byte."""
+    """Fountain power via the CTW3 BLE power-on / power-off frame."""
 
     _attr_translation_key = "power"
 
@@ -563,13 +552,11 @@ class Max2Power(_Max2Control, SwitchEntity):
         return super().available and self.wf_data.data.get("powerStatus") is not None
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        await self._send_ble(power_command(True, self._current_mode()))
-        self.wf_data.data["powerStatus"] = 1
+        await self._send_ble(power_command(True), {"powerStatus": 1})
         await self._settle()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        await self._send_ble(power_command(False, self._current_mode()))
-        self.wf_data.data["powerStatus"] = 0
+        await self._send_ble(power_command(False), {"powerStatus": 0})
         await self._settle()
 
 
@@ -610,7 +597,6 @@ class Max2Brightness(_Max2Control, SelectEntity):
         if level is None:
             return
         await self._write_setting(SETTING_BRIGHTNESS, level)
-        _settings(self.wf_data.data)[SETTING_BRIGHTNESS] = level
         await self._settle()
 
 
@@ -646,9 +632,7 @@ class Max2Mode(_Max2Control, SelectEntity):
         mode = next((value for value, name in CTW3_MODES.items() if name == option), None)
         if mode is None:
             return
-        await self._send_ble(mode_command(mode))
-        self.wf_data.data["mode"] = mode
-        self.wf_data.data["powerStatus"] = 1
+        await self._send_ble(mode_command(mode), {"mode": mode, "powerStatus": 1})
         await self._settle()
 
 
@@ -669,8 +653,7 @@ class Max2ResetFilter(_Max2Control, ButtonEntity):
         )
 
     async def async_press(self) -> None:
-        await self._send_ble(reset_filter_command())
-        self.wf_data.data["filterPercent"] = 100
+        await self._send_ble(reset_filter_command(), {"filterPercent": 100})
         await self._settle()
 
 

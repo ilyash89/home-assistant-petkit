@@ -19,8 +19,10 @@ base64-encoded, which is how the cloud BLE relay forwards the command.
 from __future__ import annotations
 
 import base64
+from datetime import datetime
 import urllib.parse
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 CTW3_TYPE = "ctw3"
 CTW3_MODEL_FALLBACK = "Eversweet Max / Max 2"
@@ -34,6 +36,20 @@ BLE_END = [251]
 
 CMD_POWER_MODE = 220
 CMD_RESET_FILTER = 222
+
+# py-petkit-api Header / Client (API 13.2.1). petkitaio 0.1.12 still sends
+# 11.2.1, and the Max 2 cloud rejects settings writes from that client with
+# Error 97 ("App is out of date"). These values are applied only to CTW3 calls.
+CTW3_API_VERSION = "13.2.1"
+CTW3_USER_AGENT = "okhttp/3.14.9"
+CTW3_CLIENT = "android(16.1;23127PN0CG)"
+
+# py-petkit-api BluetoothState. Poll result 0 is still connecting.
+BLE_POLL_CONNECTING = 0
+BLE_POLL_CONNECTED = 1
+BLE_POLL_ERROR = -1
+# py-petkit-api treats ble/controlDevice result 1 as the command accepted.
+BLE_CONTROL_OK = 1
 
 # py-petkit-api FOUNTAIN_WORKING_MODE_CTW3
 MODE_STANDARD = 1
@@ -160,26 +176,118 @@ def select_ble_type(
 
 
 def mode_command(mode: int) -> list[int]:
-    """CMD 220 payload that selects a CTW3 working mode while powered on."""
+    """CMD 220 payload that selects a CTW3 working mode while powered on.
+
+    Standard and intermittent match ``FOUNTAIN_COMMAND`` in py-petkit-api.
+    Battery uses the same layout with mode byte 3; that library has no
+    battery sample.
+    """
 
     if mode not in CTW3_MODES:
         raise ValueError(f"Unsupported CTW3 mode: {mode}")
     return [CMD_POWER_MODE, 1, 3, 0, 1, mode, 1]
 
 
-def power_command(turn_on: bool, mode: int) -> list[int]:
-    """CMD 220 power payload.
+def power_command(turn_on: bool) -> list[int]:
+    """CMD 220 power payload from py-petkit-api ``FOUNTAIN_COMMAND``.
 
-    ``state`` is 1 when turning on and 0 when turning off. The mode byte is
-    kept so the command does not rewrite Standard / Intermittent / Battery.
-    Upstream's stock POWER_OFF sample hardcodes mode 1; preserving the current
-    mode is an assumption and was not checked on hardware.
+    Power on is ``[220, 1, 3, 0, 1, 1, 1]`` and power off is
+    ``[220, 1, 3, 0, 0, 1, 1]``. The mode byte is 1 in both samples.
     """
 
-    if mode not in CTW3_MODES:
-        mode = MODE_STANDARD
     state = 1 if turn_on else 0
-    return [CMD_POWER_MODE, 1, 3, 0, state, mode, 1]
+    return [CMD_POWER_MODE, 1, 3, 0, state, MODE_STANDARD, 1]
+
+
+def known_number(value: Any) -> int | float | None:
+    """Return a usable measurement.
+
+    PetKit sends ``-1`` when total runtime, filter days, or energy were not
+    calculated. That placeholder is unknown, not a real reading.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value == -1:
+        return None
+    return value
+
+
+def timezone_offset(timezone: str | None) -> str:
+    """Hour offset string used as ``X-Timezone`` by py-petkit-api."""
+
+    if not timezone:
+        return "0.0"
+    try:
+        offset = datetime.now(ZoneInfo(timezone)).utcoffset()
+    except (ZoneInfoNotFoundError, ValueError):
+        return "0.0"
+    if offset is None:
+        return "0.0"
+    return str(offset.total_seconds() / 3600)
+
+
+def ctw3_request_headers(
+    session_header: dict[str, str], timezone: str | None
+) -> dict[str, str]:
+    """Session headers with the current PetKit app identity.
+
+    The session token from petkitaio is kept. Version, user agent, and client
+    fields are replaced so CTW3 writes are not rejected as an outdated app.
+    Other devices keep using ``create_header()`` unchanged.
+    """
+
+    headers = dict(session_header)
+    headers.update(
+        {
+            "X-Api-Version": CTW3_API_VERSION,
+            "User-Agent": CTW3_USER_AGENT,
+            "X-Client": CTW3_CLIENT,
+            "X-Img-Version": "1",
+            "X-Locale": "en-US",
+            "X-Hour": "24",
+            "X-Timezone": timezone_offset(timezone),
+        }
+    )
+    if timezone:
+        headers["X-TimezoneId"] = timezone
+    return headers
+
+
+def ble_poll_connected(result: Any) -> bool:
+    """True when ``ble/poll`` reports the relay is connected.
+
+    py-petkit-api ``BluetoothState``: 0 connecting, 1 connected, -1 error.
+    petkitaio 0.1.12 treats 0 as success; that sent CTW3 commands before the
+    relay was connected, and the fountain state did not change.
+    """
+
+    return result == BLE_POLL_CONNECTED
+
+
+def ble_control_accepted(result: Any) -> bool:
+    """True when ``ble/controlDevice`` reports the opcode was accepted."""
+
+    return result == BLE_CONTROL_OK
+
+
+def expectation_met(payload: dict[str, Any], expect: dict[str, Any] | None) -> bool:
+    """Return True when a deviceData payload contains the expected values."""
+
+    if not expect:
+        return True
+    for key, value in expect.items():
+        current = payload.get(key)
+        if isinstance(value, dict):
+            if not isinstance(current, dict):
+                return False
+            for inner_key, inner_value in value.items():
+                if current.get(inner_key) != inner_value:
+                    return False
+            continue
+        if current != value:
+            return False
+    return True
 
 
 def reset_filter_command() -> list[int]:

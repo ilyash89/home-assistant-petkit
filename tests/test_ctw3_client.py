@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock
 import aiohttp
 
 from petkitaio import PetKitClient
-from petkitaio.exceptions import PetKitError
+from petkitaio.exceptions import BluetoothError, PetKitError
 from petkitaio.model import PetKitData, W5Fountain
 
 
@@ -151,16 +151,33 @@ class Ctw3ClientTest(unittest.IsolatedAsyncioTestCase):
             group_relay=True,
             ble_relay=30,
         )
-        posts: list[tuple[str, dict]] = []
+        posts: list[tuple[str, dict, dict]] = []
+        polls = {"count": 0}
 
-        async def post(url, _header, data):
-            posts.append((url, data))
+        async def post(url, header, data):
+            posts.append((url, data, header))
             if url.endswith("ble/connect"):
                 return {"result": {"state": 1}}
+            if url.endswith("ble/poll"):
+                polls["count"] += 1
+                return {"result": 0 if polls["count"] == 1 else 1}
+            if url.endswith("ble/controlDevice"):
+                return {"result": 1}
+            if url.endswith("ctw3/deviceData"):
+                return {
+                    "result": {
+                        "id": 10,
+                        "mac": "aa:bb",
+                        "name": "Max 2",
+                        "powerStatus": 1,
+                        "settings": {"lampRingSwitch": 1},
+                    }
+                }
             return {"result": 0}
 
         self.client._post = post
-        self.client.create_header = AsyncMock(return_value={"X": "1"})
+        session_header = {"X-Session": "token", "X-Api-Version": "11.2.1"}
+        self.client.create_header = AsyncMock(return_value=session_header)
 
         await self.client.update_ctw3_settings(fountain, {"lampRingSwitch": 1})
         await self.client.send_ctw3_command(fountain, [222, 1, 0, 0])
@@ -168,10 +185,29 @@ class Ctw3ClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(posts[0][0], "https://petkit.example/ctw3/updateSettings")
         self.assertEqual(posts[0][1]["id"], 10)
         self.assertEqual(posts[0][1]["kv"], '{"lampRingSwitch": 1}')
-        control = next(item for item in posts if item[0].endswith("ble/controlDevice"))
-        self.assertEqual(control[1]["cmd"], "222")
-        self.assertEqual(control[1]["type"], 30)
-        self.assertTrue(any(url.endswith("ble/cancel") for url, _data in posts))
+        self.assertEqual(posts[0][2]["X-Api-Version"], "13.2.1")
+        self.assertEqual(posts[0][2]["X-Session"], "token")
+        self.assertEqual(session_header["X-Api-Version"], "11.2.1")
+        self.assertEqual(fountain.data["settings"]["lampRingSwitch"], 1)
+        control_index = next(
+            index for index, item in enumerate(posts) if item[0].endswith("ble/controlDevice")
+        )
+        polls_before = [item for item in posts[:control_index] if item[0].endswith("ble/poll")]
+        self.assertGreaterEqual(len(polls_before), 2)
+        self.assertEqual(posts[control_index][1]["cmd"], "222")
+        self.assertEqual(posts[control_index][1]["type"], 30)
+        self.assertEqual(posts[control_index][2]["User-Agent"], "okhttp/3.14.9")
+        self.assertTrue(any(url.endswith("ble/cancel") for url, _data, _header in posts))
+        self.assertEqual(self.client.ble_sequence, 0)
+
+        self.client._open_ble = AsyncMock(return_value=True)
+
+        async def rejected(url, header, data):
+            return {"result": 0}
+
+        self.client._post = rejected
+        with self.assertRaises(BluetoothError):
+            await self.client.send_ctw3_command(fountain, [220, 1, 3, 0, 0, 1, 1])
 
         bare = W5Fountain(
             id=10,
