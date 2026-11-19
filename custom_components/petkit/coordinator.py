@@ -4,7 +4,6 @@ from __future__ import annotations
 from datetime import timedelta
 import json
 
-from petkitaio import PetKitClient
 from petkitaio.exceptions import AuthError, PetKitError, RegionError, ServerError
 from petkitaio.model import PetKitData
 
@@ -25,6 +24,7 @@ from .const import (
     TIMEZONE,
     USE_BLE_RELAY,
 )
+from .ctw3 import ExtendedPetKitClient
 
 
 class PetKitDataUpdateCoordinator(DataUpdateCoordinator):
@@ -41,7 +41,7 @@ class PetKitDataUpdateCoordinator(DataUpdateCoordinator):
             tz = entry.options[TIMEZONE]
         self.fast_poll_expiration = None
         try:
-            self.client = PetKitClient(
+            self.client = ExtendedPetKitClient(
                 entry.data[CONF_EMAIL],
                 entry.data[CONF_PASSWORD],
                 session=async_get_clientsession(hass),

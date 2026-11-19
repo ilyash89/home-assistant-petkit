@@ -17,6 +17,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, FEEDERS, LITTER_BOXES, PETKIT_COORDINATOR, PURIFIERS, WATER_FOUNTAINS
+from .ctw3_protocol import CTW3_TYPE
+from .max2 import max2_switches
 from .coordinator import PetKitDataUpdateCoordinator
 from .exceptions import PetKitBluetoothError
 
@@ -31,6 +33,9 @@ async def async_setup_entry(
     switches = []
 
     for wf_id, wf_data in coordinator.data.water_fountains.items():
+        if wf_data.type == CTW3_TYPE:
+            switches.extend(max2_switches(coordinator, wf_id))
+            continue
         # Water Fountains (W5)
         switches.extend((
             WFLight(coordinator, wf_id),

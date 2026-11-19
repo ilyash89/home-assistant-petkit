@@ -35,7 +35,9 @@ from .const import(
     WF_MODE_OPTIONS,
 )
 from .coordinator import PetKitDataUpdateCoordinator
+from .ctw3_protocol import CTW3_TYPE
 from .exceptions import PetKitBluetoothError
+from .max2 import max2_selects
 
 LIGHT_BRIGHTNESS_TO_PETKIT = {v: k for (k, v) in LIGHT_BRIGHTNESS_COMMAND.items()}
 LIGHT_BRIGHTNESS_TO_PETKIT_NUMBERED = {v: k for (k, v) in LIGHT_BRIGHTNESS_NAMED.items()}
@@ -56,6 +58,9 @@ async def async_setup_entry(
     selects = []
 
     for wf_id, wf_data in coordinator.data.water_fountains.items():
+        if wf_data.type == CTW3_TYPE:
+            selects.extend(max2_selects(coordinator, wf_id))
+            continue
         # Water Fountains (W5)
         selects.extend((
             WFLightBrightness(coordinator, wf_id),

@@ -52,9 +52,24 @@
     },
     "entity": {
       "binary_sensor": {
-        "water_level": {
-          "name": "Уровень воды"
-        },
+      "water_level": {
+        "name": "Уровень воды"
+      },
+      "low_battery": {
+        "name": "Низкий заряд"
+      },
+      "filter_warning": {
+        "name": "Предупреждение фильтра"
+      },
+      "breakdown": {
+        "name": "Неисправность"
+      },
+      "pet_detected": {
+        "name": "Питомец обнаружен"
+      },
+      "night_dnd": {
+        "name": "Ночной режим «Не беспокоить»"
+      },
         "food_level": {
           "name": "Уровень пищи"
         },
@@ -195,13 +210,21 @@
             "high": "Высокая"
           }
         },
-        "mode": {
-          "name": "Режим",
-          "state": {
-            "normal": "Нормальный",
-            "smart": "Умный"
-          }
-        },
+      "mode": {
+        "name": "Режим",
+        "state": {
+          "normal": "Нормальный",
+          "smart": "Умный"
+        }
+      },
+      "max2_mode": {
+        "name": "Режим",
+        "state": {
+          "standard": "Стандартный",
+          "intermittent": "Прерывистый",
+          "battery": "От батареи"
+        }
+      },
         "manual_feed": {
           "name": "Кормление вручную"
         },
@@ -230,9 +253,40 @@
         "filter": {
           "name": "Фильтр"
         },
-        "purified_water_today": {
-          "name": "Очищенная вода сегодня"
-        },
+      "purified_water_today": {
+        "name": "Очищенная вода сегодня"
+      },
+      "fountain_battery": {
+        "name": "Заряд батареи"
+      },
+      "pump_status": {
+        "name": "Статус насоса",
+        "state": {
+          "running": "Работает",
+          "stopped": "Остановлен"
+        }
+      },
+      "pump_runtime_today": {
+        "name": "Время работы насоса сегодня"
+      },
+      "pump_runtime_total": {
+        "name": "Общее время работы насоса"
+      },
+      "filter_days_remaining": {
+        "name": "Осталось дней фильтра"
+      },
+      "smart_working_time": {
+        "name": "Время работы умного режима"
+      },
+      "smart_sleep_time": {
+        "name": "Время паузы умного режима"
+      },
+      "battery_working_time": {
+        "name": "Время работы от батареи"
+      },
+      "battery_sleep_time": {
+        "name": "Время паузы от батареи"
+      },
         "feeder_status": {
           "name": "Статус",
           "state": {

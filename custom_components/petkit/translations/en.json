@@ -52,9 +52,24 @@
     },
     "entity": {
       "binary_sensor": {
-        "water_level": {
-          "name": "Water level"
-        },
+      "water_level": {
+        "name": "Water level"
+      },
+      "low_battery": {
+        "name": "Low battery"
+      },
+      "filter_warning": {
+        "name": "Filter warning"
+      },
+      "breakdown": {
+        "name": "Breakdown"
+      },
+      "pet_detected": {
+        "name": "Pet detected"
+      },
+      "night_dnd": {
+        "name": "Night do not disturb"
+      },
         "food_level": {
           "name": "Food level"
         },
@@ -195,13 +210,21 @@
             "high": "High"
           }
         },
-        "mode": {
-          "name": "Mode",
-          "state": {
-            "normal": "Normal",
-            "smart": "Smart"
-          }
-        },
+      "mode": {
+        "name": "Mode",
+        "state": {
+          "normal": "Normal",
+          "smart": "Smart"
+        }
+      },
+      "max2_mode": {
+        "name": "Mode",
+        "state": {
+          "standard": "Standard",
+          "intermittent": "Intermittent",
+          "battery": "Battery"
+        }
+      },
         "manual_feed": {
           "name": "Manual feed"
         },
@@ -230,9 +253,40 @@
         "filter": {
           "name": "Filter"
         },
-        "purified_water_today": {
-          "name": "Purified water today"
-        },
+      "purified_water_today": {
+        "name": "Purified water today"
+      },
+      "fountain_battery": {
+        "name": "Battery"
+      },
+      "pump_status": {
+        "name": "Pump status",
+        "state": {
+          "running": "Running",
+          "stopped": "Stopped"
+        }
+      },
+      "pump_runtime_today": {
+        "name": "Pump runtime today"
+      },
+      "pump_runtime_total": {
+        "name": "Pump runtime total"
+      },
+      "filter_days_remaining": {
+        "name": "Filter days remaining"
+      },
+      "smart_working_time": {
+        "name": "Smart mode work time"
+      },
+      "smart_sleep_time": {
+        "name": "Smart mode sleep time"
+      },
+      "battery_working_time": {
+        "name": "Battery mode work time"
+      },
+      "battery_sleep_time": {
+        "name": "Battery mode sleep time"
+      },
         "feeder_status": {
           "name": "Status",
           "state": {
