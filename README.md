@@ -31,6 +31,8 @@ ___
 
 Join the Home Assistant PetKit discord server to follow development news or to share ideas with other users.
 
+The account signs in once, as PetKit API `13.2.1` (the same client identity as py-petkit-api). That one session is used for every device. An existing config entry does not need to be added again.
+
 ## Currently Supported Devices
 
 `Feeders`
@@ -349,11 +351,13 @@ The PetKit cloud identifies this fountain family as device type <code>CTW3</code
 | `Light`                   | `Switch`        | Cloud setting. Does not need the BLE relay. |
 | `Light brightness`        | `Select`        | Low / medium / high. Cloud setting, available while the light is on. |
 | `Do not disturb`          | `Switch`        | Turns the feature on or off. The schedule is still set in the PetKit app. Cloud setting. |
-| `Power`                   | `Switch`        | On/off through the BLE relay. The current mode is sent with the command so it is not rewritten. |
+| `Power`                   | `Switch`        | On/off through the BLE relay. |
 | `Mode`                    | `Select`        | Standard (continuous flow), intermittent, or battery. Requires the BLE relay. |
 | `Reset filter`            | `Button`        | Requires the BLE relay. |
 
-Power, mode, and filter reset use the same PetKit BLE relay as the other fountains. The opcode bytes and the rule "poll result 1 means connected" come from py-petkit-api. Light, brightness, and do-not-disturb are written with `ctw3/updateSettings`. Those writes send API version `13.2.1` (the current py-petkit-api client). Every other device still uses the petkitaio `11.2.1` headers. A cloud value of `-1` for energy, total pump runtime, or filter days is shown as unavailable.
+Power, mode, and filter reset use the same PetKit BLE relay as the other fountains. The opcode bytes and the rule "poll result 1 means connected" come from py-petkit-api. Light, brightness, and do-not-disturb are written with `ctw3/updateSettings` (`id` plus a JSON `kv` object) on the shared `13.2.1` session. A cloud value of `-1` for energy, total pump runtime, or filter days is shown as unavailable.
+
+To capture the next hardware trace, set the logger `custom_components.petkit` to `debug`. Warning lines are enough for the command result: they include the request API version, `session=shared`, BLE `type`, poll results, `controlDevice` result, and `mode` / `powerStatus` / `runStatus` / `updateAt` after each read. Tokens, passwords, MAC addresses, and device ids are not written.
 </details>
 
 ## Litter Boxes

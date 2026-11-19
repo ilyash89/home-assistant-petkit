@@ -4,8 +4,9 @@ from __future__ import annotations
 from typing import Any
 import async_timeout
 
-from petkitaio import PetKitClient
 from petkitaio.exceptions import AuthError, PetKitError, RegionError, ServerError, TimezoneError
+
+from .ctw3 import ExtendedPetKitClient
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -27,7 +28,7 @@ async def async_validate_api(
         tz = None
     else:
         tz = timezone
-    client = PetKitClient(
+    client = ExtendedPetKitClient(
         email,
         password,
         session=async_get_clientsession(hass),

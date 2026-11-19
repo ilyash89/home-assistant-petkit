@@ -13,8 +13,9 @@ from unittest.mock import AsyncMock
 import aiohttp
 
 from petkitaio import PetKitClient
+from petkitaio.constants import FeederSetting, LitterBoxSetting, PurifierSetting, W5Command
 from petkitaio.exceptions import BluetoothError, PetKitError
-from petkitaio.model import PetKitData, W5Fountain
+from petkitaio.model import Feeder, LitterBox, PetKitData, Purifier, W5Fountain
 
 
 def _install_stubs() -> None:
@@ -176,8 +177,8 @@ class Ctw3ClientTest(unittest.IsolatedAsyncioTestCase):
             return {"result": 0}
 
         self.client._post = post
-        session_header = {"X-Session": "token", "X-Api-Version": "11.2.1"}
-        self.client.create_header = AsyncMock(return_value=session_header)
+        self.client.token = "shared-token"
+        self.client.tz = "UTC"
 
         await self.client.update_ctw3_settings(fountain, {"lampRingSwitch": 1})
         await self.client.send_ctw3_command(fountain, [222, 1, 0, 0])
@@ -186,8 +187,12 @@ class Ctw3ClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(posts[0][1]["id"], 10)
         self.assertEqual(posts[0][1]["kv"], '{"lampRingSwitch": 1}')
         self.assertEqual(posts[0][2]["X-Api-Version"], "13.2.1")
-        self.assertEqual(posts[0][2]["X-Session"], "token")
-        self.assertEqual(session_header["X-Api-Version"], "11.2.1")
+        self.assertEqual(posts[0][2]["X-Session"], "shared-token")
+        self.assertEqual(posts[0][2]["F-Session"], "shared-token")
+        self.assertEqual(posts[0][2]["X-Locale"], "en-US")
+        self.assertEqual(posts[0][2]["User-Agent"], "okhttp/3.14.9")
+        self.assertEqual(self.client.token, "shared-token")
+        self.assertFalse(any("user/login" in url for url, _data, _header in posts))
         self.assertEqual(fountain.data["settings"]["lampRingSwitch"], 1)
         control_index = next(
             index for index, item in enumerate(posts) if item[0].endswith("ble/controlDevice")
@@ -218,6 +223,132 @@ class Ctw3ClientTest(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(PetKitError):
             await self.client.send_ctw3_command(bare, [222, 1, 0, 0])
+
+    async def test_one_modern_session_covers_existing_devices(self) -> None:
+        from datetime import datetime, timedelta
+
+        posts: list[tuple[str, dict, dict]] = []
+
+        async def get(url, header):
+            self.assertEqual(url, "https://passport.petkt.com/v1/regionservers")
+            self.assertEqual(header["X-Api-Version"], "13.2.1")
+            self.assertNotIn("X-Session", header)
+            return {
+                "result": {
+                    "list": [
+                        {
+                            "name": "Germany",
+                            "id": "DE",
+                            "gateway": "https://api.eu-pet.com/latest",
+                        }
+                    ]
+                }
+            }
+
+        async def post(url, header, data):
+            posts.append((url, data, header))
+            if url.endswith("user/login"):
+                return {"result": {"session": {"id": "shared-token", "userId": "u", "expiresIn": 7200}}}
+            if url.endswith("group/family/list"):
+                return {"result": [{"groupId": 7}]}
+            if url.endswith("device_detail") or url.endswith("w5/deviceData"):
+                return {"result": {"id": data.get("id", 1), "name": "device", "mac": "aa"}}
+            return {"result": []}
+
+        self.client.region = "Germany"
+        self.client.password = "secret"
+        self.client.tz = "UTC"
+        self.client._get = get
+        self.client._post = post
+
+        await self.client.login()
+        await self.client.check_token()
+
+        logins = [item for item in posts if item[0].endswith("user/login")]
+        self.assertEqual(len(logins), 1)
+        self.assertEqual(logins[0][1]["oldVersion"], "13.2.1")
+        self.assertEqual(logins[0][1]["region"], "de")
+        self.assertNotIn("11.2.1", logins[0][1]["client"])
+        self.assertNotEqual(logins[0][1]["password"], "secret")
+        self.assertEqual(logins[0][2]["X-Api-Version"], "13.2.1")
+        self.assertEqual(self.client.token, "shared-token")
+        self.assertEqual(self.client.base_url, "https://api.eu-pet.com/latest/")
+        self.assertGreater(
+            (self.client.token_expiration - datetime.now()).total_seconds(), 3600
+        )
+
+        posts.clear()
+        await self.client.update_feeder_settings(
+            Feeder(id=3, data={}, type="feeder"), FeederSetting.CHILD_LOCK, 1
+        )
+        await self.client.update_feeder_settings(
+            Feeder(id=4, data={}, type="feedermini"), FeederSetting.MINI_CHILD_LOCK, 0
+        )
+        await self.client.update_feeder_settings(
+            Feeder(id=5, data={}, type="d4"), FeederSetting.INDICATOR_LIGHT, 1
+        )
+        await self.client.update_litter_box_settings(
+            LitterBox(
+                id=8,
+                device_detail={},
+                device_record={},
+                statistics={},
+                type="t4",
+                manually_paused=False,
+            ),
+            LitterBoxSetting.AUTO_CLEAN,
+            1,
+        )
+        await self.client.update_purifier_settings(
+            Purifier(id=9, device_detail={}, type="k2"), PurifierSetting.LIGHT, 1
+        )
+        self.client.use_ble_relay = False
+        header = await self.client.create_header()
+        feeder, feeder_id = await self.client._handle_feeder({"id": 5, "type": "D4"}, header)
+        purifier, purifier_id = await self.client._handle_purifier({"id": 9, "type": "K2"}, header)
+        box, box_id = await self.client._handle_litter_box({"id": 8, "type": "T4"}, header)
+        fountain, fountain_id = await self.client._handle_water_fountain(
+            {"id": 11, "type": "W5"}, False, header
+        )
+        self.client.start_ble_connection = AsyncMock(return_value=True)
+        self.client.poll_ble_connection = AsyncMock(return_value=True)
+        await self.client.control_water_fountain(
+            W5Fountain(
+                id=11,
+                data={"id": 11, "name": "Solo", "mac": "aa", "powerStatus": 1, "mode": 1},
+                type="w5",
+                group_relay=True,
+                ble_relay=14,
+            ),
+            W5Command.NORMAL,
+        )
+
+        paths = [url.removeprefix(self.client.base_url) for url, _data, _header in posts]
+        self.assertIn("feeder/updateSettings", paths)
+        self.assertIn("feedermini/update", paths)
+        self.assertIn("d4/updateSettings", paths)
+        self.assertIn("t4/updateSettings", paths)
+        self.assertIn("k2/updateSettings", paths)
+        self.assertIn("d4/device_detail", paths)
+        self.assertIn("k2/device_detail", paths)
+        self.assertIn("t4/device_detail", paths)
+        self.assertIn("t4/getDeviceRecord", paths)
+        self.assertIn("t4/statistic", paths)
+        self.assertIn("w5/deviceData", paths)
+        self.assertIn("ble/controlDevice", paths)
+        self.assertNotIn("feeder/update", paths)
+        self.assertTrue(all(item[2]["X-Session"] == "shared-token" for item in posts))
+        self.assertTrue(all(item[2]["X-Api-Version"] == "13.2.1" for item in posts))
+        self.assertFalse(any(url.endswith("user/login") for url, _data, _header in posts))
+        self.assertEqual(feeder.type, "d4")
+        self.assertEqual(feeder_id, 5)
+        self.assertEqual(purifier.type, "k2")
+        self.assertEqual(purifier_id, 9)
+        self.assertEqual(box.type, "t4")
+        self.assertEqual(box_id, 8)
+        self.assertEqual(fountain.type, "w5")
+        self.assertEqual(fountain_id, 11)
+        self.assertGreater(self.client.token_expiration, datetime.now() + timedelta(hours=1))
 
 
 if __name__ == "__main__":

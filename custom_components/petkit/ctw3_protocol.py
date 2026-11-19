@@ -37,9 +37,9 @@ BLE_END = [251]
 CMD_POWER_MODE = 220
 CMD_RESET_FILTER = 222
 
-# py-petkit-api Header / Client (API 13.2.1). petkitaio 0.1.12 still sends
-# 11.2.1, and the Max 2 cloud rejects settings writes from that client with
-# Error 97 ("App is out of date"). These values are applied only to CTW3 calls.
+# py-petkit-api Header / Client (API 13.2.1). The one account login uses
+# these values. petkitaio 0.1.12 would otherwise sign in as iOS 11.2.1, and
+# that session is what made CTW3 settings return Error 97.
 CTW3_API_VERSION = "13.2.1"
 CTW3_USER_AGENT = "okhttp/3.14.9"
 CTW3_CLIENT = "android(16.1;23127PN0CG)"
@@ -232,9 +232,9 @@ def ctw3_request_headers(
 ) -> dict[str, str]:
     """Session headers with the current PetKit app identity.
 
-    The session token from petkitaio is kept. Version, user agent, and client
-    fields are replaced so CTW3 writes are not rejected as an outdated app.
-    Other devices keep using ``create_header()`` unchanged.
+    Version, user agent, client, locale, and timezone fields match
+    py-petkit-api 13.2.1. The caller supplies the session token. Other
+    devices keep using ``create_header()`` unchanged.
     """
 
     headers = dict(session_header)
@@ -310,3 +310,143 @@ def command_code(command: list[int]) -> str:
     """Cloud ``cmd`` form field (the BLE opcode as a decimal string)."""
 
     return str(command[0])
+
+
+# One login for the whole account. py-petkit-api uses passport v1 and this
+# client blob. petkitaio 0.1.12 uses /6/account/regionservers and iOS 11.2.1.
+PASSPORT_REGION_SERVERS = "https://passport.petkt.com/v1/regionservers"
+CHINA_GATEWAY = "https://api.petkit.cn/6/"
+
+
+def modern_client_blob(timezone: str | None) -> dict[str, str]:
+    """Client object py-petkit-api puts in the login form."""
+
+    return {
+        "locale": "en-US",
+        "name": "23127PN0CG",
+        "osVersion": "16.1",
+        "phoneBrand": "Xiaomi",
+        "platform": "android",
+        "source": "app.petkit-android",
+        "version": CTW3_API_VERSION,
+        "timezoneId": timezone or "UTC",
+        "timezone": timezone_offset(timezone),
+    }
+
+
+def modern_login_form(
+    username: str,
+    password_md5: str,
+    region_id: str,
+    timezone: str | None,
+) -> dict[str, str]:
+    """Login form body. ``client`` is a Python dict string, as both libraries send."""
+
+    return {
+        "client": str(modern_client_blob(timezone)),
+        "encrypt": "1",
+        "oldVersion": CTW3_API_VERSION,
+        "password": password_md5,
+        "region": region_id,
+        "username": username,
+    }
+
+
+def regionserver_list(response: Any) -> list[Any]:
+    """Accept either the raw JSON body or an already unwrapped result."""
+
+    if not isinstance(response, dict):
+        return []
+    result = response.get("result", response)
+    if isinstance(result, dict):
+        listing = result.get("list")
+        if isinstance(listing, list):
+            return listing
+    if isinstance(result, list):
+        return result
+    return []
+
+
+def index_region_servers(servers: Any) -> dict[str, dict[str, str]]:
+    """Map a regionservers list to ``{country name: {id, url}}``."""
+
+    indexed: dict[str, dict[str, str]] = {}
+    if not isinstance(servers, list):
+        return indexed
+    for server in servers:
+        if not isinstance(server, dict):
+            continue
+        name = str(server.get("name") or "").strip()
+        region_id = str(server.get("id") or "").strip().lower()
+        gateway = str(server.get("gateway") or "").strip()
+        if gateway and not gateway.endswith("/"):
+            gateway += "/"
+        if name and region_id and gateway:
+            indexed[name] = {"id": region_id, "url": gateway}
+    return indexed
+
+
+def feeder_settings_path(device_type: str) -> str:
+    """Settings path py-petkit-api uses for this feeder.
+
+    Fresh Element (``feeder``) and D3/D4 use ``updateSettings``. The Mini
+    still uses ``update``. petkitaio 0.1.12 posts Fresh Element to
+    ``feeder/update``.
+    """
+
+    if device_type == "feedermini":
+        return "feedermini/update"
+    if device_type == "feeder":
+        return "feeder/updateSettings"
+    return f"{device_type}/updateSettings"
+
+
+_SECRET_KEYS = {
+    "password",
+    "client",
+    "token",
+    "session",
+    "data",
+    "mac",
+    "sn",
+    "id",
+    "bleid",
+    "username",
+    "groupid",
+}
+
+
+def sanitize_mapping(value: Any) -> Any:
+    """Copy a request or response with secrets and device identifiers removed."""
+
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            if str(key).lower() in _SECRET_KEYS or str(key).lower() in {"x-session", "f-session"}:
+                cleaned[key] = "present" if item not in (None, "") else "missing"
+                continue
+            cleaned[key] = sanitize_mapping(item)
+        return cleaned
+    if isinstance(value, list):
+        return [sanitize_mapping(item) for item in value[:8]]
+    if isinstance(value, str) and len(value) > 180:
+        return f"<len {len(value)}>"
+    return value
+
+
+def device_state_summary(payload: Any) -> dict[str, Any]:
+    """Fields that show whether a CTW3 command actually landed."""
+
+    if not isinstance(payload, dict):
+        return {"result": payload}
+    settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
+    status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
+    return {
+        "mode": payload.get("mode", status.get("mode")),
+        "powerStatus": payload.get("powerStatus", status.get("powerStatus")),
+        "runStatus": payload.get("runStatus", status.get("runStatus")),
+        "updateAt": payload.get("updateAt"),
+        "lampRingSwitch": settings.get("lampRingSwitch"),
+        "lampRingBrightness": settings.get("lampRingBrightness"),
+        "noDisturbingSwitch": settings.get("noDisturbingSwitch"),
+    }
