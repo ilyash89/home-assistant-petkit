@@ -9,14 +9,15 @@ other device and adds the Max family beside those results.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
+import hashlib
 import json
 from typing import Any
 
 from petkitaio import PetKitClient
-from petkitaio.constants import Endpoint
-from petkitaio.exceptions import BluetoothError, PetKitError
-from petkitaio.model import W5Fountain
+from petkitaio.constants import Endpoint, FeederSetting
+from petkitaio.exceptions import BluetoothError, PetKitError, RegionError, TimezoneError
+from petkitaio.model import Feeder, W5Fountain
 
 from .const import LOGGER
 from .ctw3_protocol import (
@@ -24,8 +25,11 @@ from .ctw3_protocol import (
     CTW3_DATA_ENDPOINT,
     CTW3_MODEL_FALLBACK,
     CTW3_SETTINGS_ENDPOINT,
+    CHINA_GATEWAY,
+    CTW3_API_VERSION,
     CTW3_TYPE,
     DEVICE_CATALOG_ENDPOINT,
+    PASSPORT_REGION_SERVERS,
     ble_control_accepted,
     ble_poll_connected,
     command_code,
@@ -33,10 +37,14 @@ from .ctw3_protocol import (
     device_state_summary,
     encode_ble_frame,
     expectation_met,
+    feeder_settings_path,
     flatten_device_catalog,
+    index_region_servers,
     is_ctw3_type,
     model_name_from_catalog,
+    modern_login_form,
     normalize_ctw3_payload,
+    regionserver_list,
     sanitize_mapping,
     select_ble_type,
 )
@@ -105,8 +113,7 @@ class ExtendedPetKitClient(PetKitClient):
         url = f"{base_url}{CTW3_SETTINGS_ENDPOINT}"
         body = {"id": fountain.id, "kv": json.dumps(settings)}
         LOGGER.warning(
-            "CTW3 settings write keys=%s header=api-%s session=shared. "
-            "The account login is still petkitaio 11.2.1, so this call may return Error 97.",
+            "CTW3 settings write keys=%s header=api-%s session=shared",
             settings,
             header.get("X-Api-Version"),
         )
@@ -221,15 +228,136 @@ class ExtendedPetKitClient(PetKitClient):
                 device_state_summary(fountain.data),
             )
 
-    async def _ctw3_header(self) -> dict[str, str]:
-        """CTW3 headers on the single shared petkitaio session.
+    async def get_api_server_list(self) -> None:
+        """Load regional gateways from passport ``v1/regionservers``.
 
-        The token is the one ``create_header()`` already uses for feeders,
-        litter boxes, purifiers, and W5 fountains. Version and client fields
-        on the CTW3 request are overlaid. There is no second login.
+        This replaces petkitaio's ``/6/account/regionservers`` call. China is
+        not in that list; py-petkit-api uses the China host directly.
         """
 
-        return ctw3_request_headers(await self.create_header(), self.tz)
+        if str(self.region).lower() in {"china", "cn"}:
+            self.servers_dict = {self.region: {"id": "china", "url": CHINA_GATEWAY}}
+            return
+        header = ctw3_request_headers(
+            {
+                "Accept": "*/*",
+                "Accept-Language": "en-US;q=1, it-US;q=0.9",
+                "Accept-Encoding": "gzip, deflate",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            self.tz,
+        )
+        response = await self._get(PASSPORT_REGION_SERVERS, header)
+        indexed = index_region_servers(regionserver_list(response))
+        if self.region not in indexed:
+            for name, info in indexed.items():
+                if name.lower() == str(self.region).lower():
+                    indexed[self.region] = info
+                    break
+        self.servers_dict = indexed
+
+    async def login(self) -> None:
+        """Sign in once as API 13.2.1 and keep that token for every device."""
+
+        await self.get_api_server_list()
+        known = self.servers_dict.get(self.region)
+        if str(self.region).lower() in {"china", "cn"}:
+            self.base_url = CHINA_GATEWAY
+            region_id = "china"
+        elif known:
+            self.base_url = known["url"]
+            region_id = known["id"]
+        else:
+            raise RegionError("Region specified is not a valid region.")
+        if not str(self.base_url).endswith("/"):
+            self.base_url = f"{self.base_url}/"
+        form = modern_login_form(
+            self.username,
+            hashlib.md5(self.password.encode()).hexdigest(),
+            region_id,
+            self.tz,
+        )
+        header = ctw3_request_headers(
+            {
+                "Accept": "*/*",
+                "Accept-Language": "en-US;q=1, it-US;q=0.9",
+                "Accept-Encoding": "gzip, deflate",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            self.tz,
+        )
+        url = f"{self.base_url}{Endpoint.LOGIN}"
+        host = self.base_url.split("/")[2] if "://" in self.base_url else self.base_url
+        LOGGER.warning(
+            "PetKit shared login API %s host=%s region=%s session=shared",
+            CTW3_API_VERSION,
+            host,
+            region_id,
+        )
+        response = await self._post(url, header, form)
+        session = (response.get("result") or {}).get("session") or {}
+        token = session.get("id")
+        if not token:
+            raise PetKitError("PetKit login did not return a session")
+        self.user_id = session.get("userId")
+        self.token = token
+        expires_in = int(session.get("expiresIn") or 3600)
+        self.token_expiration = datetime.now() + timedelta(seconds=expires_in)
+        await self.get_group_ids()
+
+    async def create_header(self) -> dict[str, str]:
+        """Headers for every device on the single 13.2.1 session."""
+
+        if self.tz is None:
+            raise TimezoneError("Unable to find the TZ environmental variable on the OS")
+        return ctw3_request_headers(
+            {
+                "Accept": "*/*",
+                "Accept-Language": "en-US;q=1, it-US;q=0.9",
+                "Accept-Encoding": "gzip, deflate",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "X-Session": self.token or "",
+                "F-Session": self.token or "",
+            },
+            self.tz,
+        )
+
+    async def update_feeder_settings(
+        self, feeder: Feeder, setting: FeederSetting, value: int
+    ) -> None:
+        """Write feeder settings. Fresh Element follows py-petkit-api's path."""
+
+        if feeder.type == "feeder":
+            header = await self.create_header()
+            await self._post(
+                f"{self.base_url}{feeder_settings_path(feeder.type)}",
+                header,
+                {"id": feeder.id, "kv": json.dumps({setting: value})},
+            )
+            return
+        await super().update_feeder_settings(feeder, setting, value)
+
+    async def _post(
+        self, url: str, headers: dict[str, Any], data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """POST and keep a sanitized trace of the shared session."""
+
+        LOGGER.debug(
+            "PetKit POST %s headers=%s body=%s",
+            url.split("?")[0],
+            sanitize_mapping(headers),
+            sanitize_mapping(data or {}),
+        )
+        try:
+            return await super()._post(url, headers, data)
+        except Exception as err:
+            LOGGER.warning("PetKit POST %s failed: %s", url.split("?")[0], err)
+            raise
+
+    async def _ctw3_header(self) -> dict[str, str]:
+        """CTW3 headers. They are the same single session as every other device."""
+
+        return await self.create_header()
 
     async def _exchange(
         self,

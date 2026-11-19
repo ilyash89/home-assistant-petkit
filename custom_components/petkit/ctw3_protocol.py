@@ -37,10 +37,9 @@ BLE_END = [251]
 CMD_POWER_MODE = 220
 CMD_RESET_FILTER = 222
 
-# py-petkit-api Header / Client (API 13.2.1). petkitaio 0.1.12 logs in as
-# 11.2.1. Putting these headers on that same session does not clear Error 97
-# on CTW3 settings writes. CTW3 calls still send them so the log shows the
-# request identity. The account keeps a single login.
+# py-petkit-api Header / Client (API 13.2.1). The one account login uses
+# these values. petkitaio 0.1.12 would otherwise sign in as iOS 11.2.1, and
+# that session is what made CTW3 settings return Error 97.
 CTW3_API_VERSION = "13.2.1"
 CTW3_USER_AGENT = "okhttp/3.14.9"
 CTW3_CLIENT = "android(16.1;23127PN0CG)"
@@ -311,6 +310,95 @@ def command_code(command: list[int]) -> str:
     """Cloud ``cmd`` form field (the BLE opcode as a decimal string)."""
 
     return str(command[0])
+
+
+# One login for the whole account. py-petkit-api uses passport v1 and this
+# client blob. petkitaio 0.1.12 uses /6/account/regionservers and iOS 11.2.1.
+PASSPORT_REGION_SERVERS = "https://passport.petkt.com/v1/regionservers"
+CHINA_GATEWAY = "https://api.petkit.cn/6/"
+
+
+def modern_client_blob(timezone: str | None) -> dict[str, str]:
+    """Client object py-petkit-api puts in the login form."""
+
+    return {
+        "locale": "en-US",
+        "name": "23127PN0CG",
+        "osVersion": "16.1",
+        "phoneBrand": "Xiaomi",
+        "platform": "android",
+        "source": "app.petkit-android",
+        "version": CTW3_API_VERSION,
+        "timezoneId": timezone or "UTC",
+        "timezone": timezone_offset(timezone),
+    }
+
+
+def modern_login_form(
+    username: str,
+    password_md5: str,
+    region_id: str,
+    timezone: str | None,
+) -> dict[str, str]:
+    """Login form body. ``client`` is a Python dict string, as both libraries send."""
+
+    return {
+        "client": str(modern_client_blob(timezone)),
+        "encrypt": "1",
+        "oldVersion": CTW3_API_VERSION,
+        "password": password_md5,
+        "region": region_id,
+        "username": username,
+    }
+
+
+def regionserver_list(response: Any) -> list[Any]:
+    """Accept either the raw JSON body or an already unwrapped result."""
+
+    if not isinstance(response, dict):
+        return []
+    result = response.get("result", response)
+    if isinstance(result, dict):
+        listing = result.get("list")
+        if isinstance(listing, list):
+            return listing
+    if isinstance(result, list):
+        return result
+    return []
+
+
+def index_region_servers(servers: Any) -> dict[str, dict[str, str]]:
+    """Map a regionservers list to ``{country name: {id, url}}``."""
+
+    indexed: dict[str, dict[str, str]] = {}
+    if not isinstance(servers, list):
+        return indexed
+    for server in servers:
+        if not isinstance(server, dict):
+            continue
+        name = str(server.get("name") or "").strip()
+        region_id = str(server.get("id") or "").strip().lower()
+        gateway = str(server.get("gateway") or "").strip()
+        if gateway and not gateway.endswith("/"):
+            gateway += "/"
+        if name and region_id and gateway:
+            indexed[name] = {"id": region_id, "url": gateway}
+    return indexed
+
+
+def feeder_settings_path(device_type: str) -> str:
+    """Settings path py-petkit-api uses for this feeder.
+
+    Fresh Element (``feeder``) and D3/D4 use ``updateSettings``. The Mini
+    still uses ``update``. petkitaio 0.1.12 posts Fresh Element to
+    ``feeder/update``.
+    """
+
+    if device_type == "feedermini":
+        return "feedermini/update"
+    if device_type == "feeder":
+        return "feeder/updateSettings"
+    return f"{device_type}/updateSettings"
 
 
 _SECRET_KEYS = {
